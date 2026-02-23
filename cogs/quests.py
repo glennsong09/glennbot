@@ -129,15 +129,28 @@ async def make_pack(type):
         rares = await get_cards_by_set_and_rarity(session, type, "Rare")
         epics = await get_cards_by_set_and_rarity(session, type, "Epic")
         showcases = await get_cards_by_set_and_rarity(session, type, "Showcase")
-        #tokens = await get_cards_by_set_and_type(session, "OGN", "Token")
-        #runes = await get_cards_by_set_and_type(session, type, "Rune")
+        signatures = []
+        alt_arts = []
+        overnumbered = []
 
+        for i in showcases:
+            if i["metadata"]["signature"] == True:
+                signatures.append(i)
+        
+        for i in showcases:
+            if i["metadata"]["alternate_art"] == True:
+                alt_arts.append(i)
+
+        for i in showcases:
+            if i["metadata"]["overnumbered"] == True and i["metadata"]["signature"] == False:
+                overnumbered.append(i)
+        
         # 7 commons
         while len(cards) < 7:
             curr_card = random.choice(commons)
             if not ((curr_card["classification"]["supertype"] == "Token")
                 or (curr_card["classification"]["type"] == "Rune")):
-                cards.append(curr_card )
+                cards.append(curr_card)
 
         # 3 uncommons
         while len(cards) < 10:
@@ -146,55 +159,48 @@ async def make_pack(type):
             
         # 1 foil of any rarity
         while len(cards) < 11:
-            curr_card = random.choice(commons + uncommons + rares + epics + showcases)
             luck = random.randint(1, 720)
-            if not ((curr_card["classification"]["supertype"] == "Token")
-                    or (curr_card["classification"]["type"] == "Rune")):
-                if (curr_card["metadata"]["signature"] == True):
-                    if luck == 1:
-                        cards.append(curr_card)
-                        break
-                if (curr_card["metadata"]["overnumbered"] == True):
-                    if luck <= 10:
-                        cards.append(curr_card)
-                        break   
-                if (curr_card["metadata"]["alternate_art"] == True):
-                    if luck <= 60:
-                        cards.append(curr_card)
-                        break 
-                if (curr_card["classification"]["rarity"] == "Epic"):
-                    if luck <= 180:
-                        cards.append(curr_card)
-                        break 
+            if luck == 1:
+                curr_card = random.choice(signatures)
+                cards.append(curr_card)
+                break
+            if luck <= 10:
+                curr_card = random.choice(overnumbered)
+                cards.append(curr_card)
+                break   
+            if luck <= 60:
+                curr_card = random.choice(alt_arts)
+                cards.append(curr_card)
+                break   
+            if luck <= 180:
+                curr_card = random.choice(epics)
+                cards.append(curr_card)
+                break 
+            curr_card = random.choice(rares + uncommons + commons)
             cards.append(curr_card)
 
         #2 rares or better
         while len(cards) < 13:
-            curr_card = random.choice(rares + epics + showcases)
             luck = random.randint(1, 720)
-            if not ((curr_card["classification"]["supertype"] == "Token")
-                    or (curr_card["classification"]["type"] == "Rune")):
-                if (curr_card["metadata"]["signature"] == True):
-                    if luck == 1:
-                        cards.append(curr_card)
-                        break
-                if (curr_card["metadata"]["overnumbered"] == True):
-                    if luck <= 10:
-                        cards.append(curr_card)
-                        break   
-                if (curr_card["metadata"]["alternate_art"] == True):
-                    if luck <= 60:
-                        cards.append(curr_card)
-                        break 
-                if (curr_card["classification"]["rarity"] == "Epic"):
-                    if luck <= 180:
-                        cards.append(curr_card)
-                        break 
+            if luck == 1:
+                curr_card = random.choice(signatures)
+                cards.append(curr_card)
+                break
+            if luck <= 10:
+                curr_card = random.choice(overnumbered)
+                cards.append(curr_card)
+                break   
+            if luck <= 60:
+                curr_card = random.choice(alt_arts)
+                cards.append(curr_card)
+                break   
+            if luck <= 180:
+                curr_card = random.choice(epics)
+                cards.append(curr_card)
+                break 
+            curr_card = random.choice(rares)
             cards.append(curr_card)
-
-        # 1 token or rune
-        #cards.append(random.choice(showcases + epics + rares))
-
+            
     return cards
 
 # Returns the pack as a list of embeds, one per card.
