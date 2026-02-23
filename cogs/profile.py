@@ -24,7 +24,7 @@ class Profile(Cog):
             display_name = display_name[0] # Otherwise, it comes up in a tuple
 
         # Get stats
-        profile_pic = target.avatar_url
+        profile_pic = target.avatar.url
         level, exp, tokens = db.records("SELECT level, exp, tokens FROM profiles WHERE user_id=?", target.id)[0]
         current_quest = db.record("SELECT current_quest FROM profiles WHERE user_id=?", target.id)[0]
 
@@ -45,6 +45,5 @@ class Profile(Cog):
             db.commit()
         
 
-def setup(bot):
-    bot.add_cog(Profile(bot))
-    
+async def setup(bot):
+    await bot.add_cog(Profile(bot))
