@@ -1,7 +1,9 @@
-from ast import alias
 import discord
 import random
 import math
+import aiohttp
+
+from ast import alias
 from dataclasses import replace
 from discord import Member, Embed, Color
 from discord.ext import commands
@@ -11,6 +13,9 @@ from database import db
 from datetime import datetime, timedelta
 
 # TODO: random synchronized encounters, several people have to do it in order to get the xp + completion
+# QUEST STUFF
+# QUEST STUFF
+# QUEST STUFF
 
 # Here is the list of all quests separated by types.
 # TODO: More types of quests
@@ -47,7 +52,8 @@ good_night_roulette = ['Sleep well!',
 gm_cd_roulette = ['Good morning again!',
                   'We\'ve already said good morning!']
 gn_cd_roulette = ['Good night again!',
-                  'We\'ve already said good night!']
+                  'We\'ve already said good night!',
+                  'Do you miss me or something? Dummy... go to bed!']
 
 # Assigns a quest a random value for how many the user has to do.
 def give_int(quest):
@@ -109,8 +115,139 @@ def make_quests(type):
     xp_generated = 50 + (50 * num_quests_picked) + (8 * counter)
     return (quests, xp_generated)
 
-def setup(bot): 
-        bot.add_cog(Quests(bot)) 
+# PACK STUFF
+# PACK STUFF
+# PACK STUFF
+
+# Assembles a pack
+# Type: 0 = origins, 1 = spiritforged
+async def make_pack(type):
+    async with aiohttp.ClientSession() as session:
+        cards = []
+        commons = await get_cards_by_set_and_rarity(session, type, "Common")
+        uncommons = await get_cards_by_set_and_rarity(session, type, "Uncommon")
+        rares = await get_cards_by_set_and_rarity(session, type, "Rare")
+        epics = await get_cards_by_set_and_rarity(session, type, "Epic")
+        showcases = await get_cards_by_set_and_rarity(session, type, "Showcase")
+        #tokens = await get_cards_by_set_and_type(session, "OGN", "Token")
+        #runes = await get_cards_by_set_and_type(session, type, "Rune")
+
+        # 7 commons
+        while len(cards) < 7:
+            curr_card = random.choice(commons)
+            if not ((curr_card["classification"]["supertype"] == "Token")
+                or (curr_card["classification"]["type"] == "Rune")):
+                cards.append(curr_card )
+
+        # 3 uncommons
+        while len(cards) < 10:
+            curr_card = random.choice(uncommons)
+            cards.append(curr_card) 
+            
+        # 1 foil of any rarity
+        while len(cards) < 11:
+            curr_card = random.choice(commons + uncommons + rares + epics + showcases)
+            luck = random.randint(1, 720)
+            if not ((curr_card["classification"]["supertype"] == "Token")
+                    or (curr_card["classification"]["type"] == "Rune")):
+                if (curr_card["metadata"]["signature"] == True):
+                    if luck == 1:
+                        cards.append(curr_card)
+                        break
+                if (curr_card["metadata"]["overnumbered"] == True):
+                    if luck <= 10:
+                        cards.append(curr_card)
+                        break   
+                if (curr_card["metadata"]["alternate_art"] == True):
+                    if luck <= 60:
+                        cards.append(curr_card)
+                        break 
+                if (curr_card["classification"]["rarity"] == "Epic"):
+                    if luck <= 180:
+                        cards.append(curr_card)
+                        break 
+            cards.append(curr_card)
+
+        #2 rares or better
+        while len(cards) < 13:
+            curr_card = random.choice(rares + epics + showcases)
+            luck = random.randint(1, 720)
+            if not ((curr_card["classification"]["supertype"] == "Token")
+                    or (curr_card["classification"]["type"] == "Rune")):
+                if (curr_card["metadata"]["signature"] == True):
+                    if luck == 1:
+                        cards.append(curr_card)
+                        break
+                if (curr_card["metadata"]["overnumbered"] == True):
+                    if luck <= 10:
+                        cards.append(curr_card)
+                        break   
+                if (curr_card["metadata"]["alternate_art"] == True):
+                    if luck <= 60:
+                        cards.append(curr_card)
+                        break 
+                if (curr_card["classification"]["rarity"] == "Epic"):
+                    if luck <= 180:
+                        cards.append(curr_card)
+                        break 
+            cards.append(curr_card)
+
+        # 1 token or rune
+        #cards.append(random.choice(showcases + epics + rares))
+
+    return cards
+
+# Returns the pack as a list of embeds, one per card.
+def return_embeds(pack):
+    embeds = []
+    for card in pack:
+        embed = discord.Embed(title=card["name"])
+        embed.set_image(url=card["media"]["image_url"])
+        embeds.append(embed)
+    return embeds
+
+async def get_cards_by_set_and_type(session, set_id: str, card_type: str) -> list:
+    url = "https://api.riftcodex.com/cards"
+    params = {"size": 50, "page": 1}
+    all_cards = []
+
+    while True:
+        async with session.get(url, params=params) as resp:
+            data = await resp.json()
+
+        for card in data["items"]:
+            if (card["set"]["set_id"] == set_id and
+                    card["classification"]["type"] == card_type):
+                all_cards.append(card)
+
+        if data["page"] >= data["pages"]:
+            break
+        params["page"] += 1
+
+    return all_cards
+
+async def get_cards_by_set_and_rarity(session, set_id: str, rarity: str) -> list:
+    url = "https://api.riftcodex.com/cards"
+    params = {"size": 50, "page": 1}
+    all_cards = []
+
+    while True:
+        async with session.get(url, params=params) as resp:
+            data = await resp.json()
+
+        for card in data["items"]:
+            if (card["set"]["set_id"] == set_id and
+                    card["classification"]["rarity"] == rarity):
+                all_cards.append(card)
+
+        if data["page"] >= data["pages"]:
+            break
+        params["page"] += 1
+
+    return all_cards
+
+async def setup(bot):
+        await bot.add_cog(Quests(bot)) 
 
 class Quests(commands.Cog):
     def __init__(self, bot):
@@ -120,14 +257,24 @@ class Quests(commands.Cog):
     async def on_ready(self):
         print('Bot is online.')
 
+    @commands.Cog.listener()
+    async def on_connect(self):
+        print('Bot is connected.')
+
     # Hello command.
-    @commands.command(name='hello', aliases = ['hi', 'heya', 'hihi', 'Hello', 'HELLO'])
+    @commands.command(name='hello', aliases = ['hi', 'heya', 'hihi', 'Hello', 'HELLO', 'hai'])
     async def hello(self, ctx):
         await self._register_profile(ctx.author)
         await ctx.send(f"Hello, {ctx.author.mention}!")
 
+    ''' # Hello command.
+    @commands.command()
+    async def hello(self, ctx):
+        await self._register_profile(ctx.author)
+        await ctx.send(f"Hello, {ctx.author.mention}!") '''
+
     # Goodbye command.
-    @commands.command(name='bye', aliases = ['Bye', 'byebye', 'BYE'])
+    @commands.command(name='bye', aliases = ['Bye', 'byebye', 'BYE', 'bai', 'baibai'])
     async def bye(self, ctx):
         await self._register_profile(ctx.author)
         await ctx.send(f'Bye, {ctx.author.mention}!')
@@ -154,7 +301,7 @@ class Quests(commands.Cog):
         await ctx.send(f'{ctx.author.mention} ' + gm_statement)
 
     # Good night command
-    # TODO:  Need to check if time is before 2 am in the person's timezone
+    # TODO:  Need to check if time is before 12 am in the person's timezone
     @commands.command(name='goodnight', aliases = ['gn', 'GN'])
     @cooldown(1, 57600, BucketType.user)
     async def goodnight(self, ctx):
@@ -166,13 +313,25 @@ class Quests(commands.Cog):
         gn_statement = random.choice(good_night_roulette)
         await ctx.send(f'{ctx.author.mention} ' + gn_statement)
 
+    # Focused work start command.
+    # TODO: bank for 2 hours of focused work, can ping start
+    #@commands.command(name='focusedworkstart', aliases = ['fwstart', 'Focusedworkstart'])
+    #async def quest(self, ctx): 
+        #return
+
+    # Focused work stop command.
+    # TODO: bank for 2 hours of focused work, can ping stop
+    #@commands.command(name='focusedwork', aliases = ['fwstop', 'Focusedworkstop'])
+    #async def quest(self, ctx): 
+        #return
+
     # Quest command.
     # TODO: make cd reset at a common time (user's time)
     @commands.command(name='quest')
-    #@cooldown(1, 86400, BucketType.user)
-    async def quest(self, ctx, target: Optional[Member], type: Optional[str]): 
+    @cooldown(1, 86400, BucketType.user)
+    async def quest(self, ctx, type: Optional[str]): 
         await self._register_profile(ctx.author)
-        target = target or ctx.author
+        target = ctx.author
         final_quests = []
 
         if (type == 'easy'):
@@ -207,6 +366,27 @@ class Quests(commands.Cog):
         db.commit()
         await self._check_level(ctx)
         await ctx.send("Okay! Here are your rewards: " + str(curr_quest_xp) + "XP.")
+
+    # Command to generate a riftbound pack.
+    @commands.command(name='generateriftboundpack')
+    async def gen_riftbound(self, ctx, type: Optional[str]): 
+        await self._register_profile(ctx.author)
+        target = ctx.author
+        pack = []
+        
+        # Generate a pack
+        if (type == 'origins'):
+            pack = await make_pack('OGN')
+        else: 
+            pack = await make_pack('SFD')
+
+        # Create embeds for the pack
+        embeds = return_embeds(pack)
+
+        # Send embeds in batches of 10 since discord has a limit of 10 embeds per message
+        # await ctx.send(embeds=embeds)
+        await ctx.send(embeds=embeds[0:10])
+        await ctx.send(embeds=embeds[10:13])
 
     # Registers the user if they don't have a profile. Otherwise, does nothing.
     async def _register_profile(self, user):
