@@ -2,6 +2,11 @@ import discord
 import random
 import math
 import aiohttp
+import asyncio
+import io
+from aiocache import cached
+from aiocache.serializers import PickleSerializer
+from PIL import Image
 
 from ast import alias
 from dataclasses import replace
@@ -119,98 +124,176 @@ def make_quests(type):
 # PACK STUFF
 # PACK STUFF
 
-# Assembles a pack
-# Type: 0 = origins, 1 = spiritforged
-async def make_pack(type):
+@cached(ttl=3600, serializer=PickleSerializer())
+async def get_all_cards() -> list:
+    """Fetch all cards from the API. Results are cached for 1 hour."""
+    url = "https://api.riftcodex.com/cards"
+    params = {"size": 50, "page": 1}
+    all_cards = []
+
     async with aiohttp.ClientSession() as session:
-        cards = []
-        commons = await get_cards_by_set_and_rarity(session, type, "Common")
-        uncommons = await get_cards_by_set_and_rarity(session, type, "Uncommon")
-        rares = await get_cards_by_set_and_rarity(session, type, "Rare")
-        epics = await get_cards_by_set_and_rarity(session, type, "Epic")
-        showcases = await get_cards_by_set_and_rarity(session, type, "Showcase")
-        signatures = []
-        alt_arts = []
-        overnumbered = []
+        while True:
+            async with session.get(url, params=params) as resp:
+                data = await resp.json()
 
-        for i in showcases:
-            if i["metadata"]["signature"] == True:
-                signatures.append(i)
-        
-        for i in showcases:
-            if i["metadata"]["alternate_art"] == True:
-                alt_arts.append(i)
+            all_cards.extend(data["items"])
 
-        for i in showcases:
-            if i["metadata"]["overnumbered"] == True and i["metadata"]["signature"] == False:
-                overnumbered.append(i)
-        
-        # 7 commons
-        while len(cards) < 7:
-            curr_card = random.choice(commons)
-            if not ((curr_card["classification"]["supertype"] == "Token")
-                or (curr_card["classification"]["type"] == "Rune")):
-                cards.append(curr_card)
-
-        # 3 uncommons
-        while len(cards) < 10:
-            curr_card = random.choice(uncommons)
-            cards.append(curr_card) 
-            
-        # 1 foil of any rarity
-        while len(cards) < 11:
-            luck = random.randint(1, 720)
-            if luck == 1:
-                curr_card = random.choice(signatures)
-                cards.append(curr_card)
+            if data["page"] >= data["pages"]:
                 break
-            if luck <= 10:
-                curr_card = random.choice(overnumbered)
-                cards.append(curr_card)
-                break   
-            if luck <= 60:
-                curr_card = random.choice(alt_arts)
-                cards.append(curr_card)
-                break   
-            if luck <= 180:
-                curr_card = random.choice(epics)
-                cards.append(curr_card)
-                break 
-            curr_card = random.choice(rares + uncommons + commons)
-            cards.append(curr_card)
+            params["page"] += 1
 
-        #2 rares or better
-        while len(cards) < 13:
-            luck = random.randint(1, 720)
-            if luck == 1:
-                curr_card = random.choice(signatures)
-                cards.append(curr_card)
-                break
-            if luck <= 10:
-                curr_card = random.choice(overnumbered)
-                cards.append(curr_card)
-                break   
-            if luck <= 60:
-                curr_card = random.choice(alt_arts)
-                cards.append(curr_card)
-                break   
-            if luck <= 180:
-                curr_card = random.choice(epics)
-                cards.append(curr_card)
-                break 
-            curr_card = random.choice(rares)
+    return all_cards
+
+
+def filter_by_set(cards: list, set_id: str) -> list:
+    """Filter cards by set ID."""
+    return [c for c in cards if c["set"]["set_id"] == set_id]
+
+
+def filter_by_rarity(cards: list, rarity: str) -> list:
+    """Filter cards by rarity."""
+    return [c for c in cards if c["classification"]["rarity"] == rarity]
+
+
+# Assembles a pack
+# Type: OGN = origins, SFD = spiritforged
+async def make_pack(type):
+    all_cards = await get_all_cards()
+    set_cards = filter_by_set(all_cards, type)
+
+    commons = filter_by_rarity(set_cards, "Common")
+    # Remove tokens and runes from commons
+    commons = [c for c in commons if not ((c["classification"]["supertype"] == "Token")
+                                               or (c["classification"]["type"] == "Rune"))]
+    uncommons = filter_by_rarity(set_cards, "Uncommon")
+    rares = filter_by_rarity(set_cards, "Rare")
+    epics = filter_by_rarity(set_cards, "Epic")
+    showcases = filter_by_rarity(set_cards, "Showcase")
+
+    signatures = [c for c in showcases if c["metadata"]["signature"] == True]
+    alt_arts = [c for c in showcases if c["metadata"]["alternate_art"] == True]
+    overnumbered = [
+        c for c in showcases
+        if c["metadata"]["overnumbered"] == True and c["metadata"]["signature"] == False
+    ]
+
+    cards = []
+
+    # 7 commons
+    while len(cards) < 7:
+        curr_card = random.choice(commons)
+        cards.append(curr_card)
+
+    # 3 uncommons
+    while len(cards) < 10:
+        curr_card = random.choice(uncommons)
+        cards.append(curr_card)
+
+    # 1 foil of any rarity
+    while len(cards) < 11:
+        luck = random.randint(1, 720)
+        print("foil", luck)
+        if luck == 1:
+            curr_card = random.choice(signatures)
             cards.append(curr_card)
-            
+            print(curr_card)
+            continue
+        if luck <= 11:
+            curr_card = random.choice(overnumbered)
+            cards.append(curr_card)
+            print(curr_card)
+            continue
+        if luck <= 71:
+            curr_card = random.choice(alt_arts)
+            cards.append(curr_card)
+            print(curr_card)
+            continue
+        if luck <= 251:
+            curr_card = random.choice(epics)
+            cards.append(curr_card)
+            print(curr_card)
+            continue
+        curr_card = random.choice(rares + uncommons + commons)
+        cards.append(curr_card)
+        print(curr_card)
+
+    # 2 rares or better
+    while len(cards) < 13:
+        luck = random.randint(1, 720)
+        print("rare", luck)
+        if luck == 1:
+            curr_card = random.choice(signatures)
+            cards.append(curr_card)
+            print(curr_card)
+            continue
+        if luck <= 11:
+            curr_card = random.choice(overnumbered)
+            cards.append(curr_card)
+            print(curr_card)
+            continue
+        if luck <= 71:
+            curr_card = random.choice(alt_arts)
+            cards.append(curr_card)
+            print(curr_card)
+            continue
+        if luck <= 251:
+            curr_card = random.choice(epics)
+            cards.append(curr_card)
+            print(curr_card)
+            continue
+        curr_card = random.choice(rares)
+        cards.append(curr_card)
+        print(curr_card)
+    print("---")
+
     return cards
 
-# Returns the pack as a list of embeds, one per card.
-def return_embeds(pack):
-    embeds = []
-    for card in pack:
-        embed = discord.Embed(title=card["name"])
-        embed.set_image(url=card["media"]["image_url"])
-        embeds.append(embed)
-    return embeds
+CARD_W, CARD_H = 744, 1039
+
+async def fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image:
+    async with session.get(url) as resp:
+        data = await resp.read()
+    img = Image.open(io.BytesIO(data)).convert("RGBA")
+    if img.width > img.height:
+        img = img.rotate(90, expand=True)
+    if img.size != (CARD_W, CARD_H):
+        img = img.resize((CARD_W, CARD_H), Image.LANCZOS)
+    return img
+
+
+async def build_pack_image(pack: list) -> discord.File:
+    """
+    Layout (13 cards):
+      Row 1: cards 0-6  (7 commons, left-to-right)
+      Row 2: cards 7-9  (3 uncommons, left-aligned)
+             cards 10-12 (foil + 2 rares, right-aligned)
+    """
+    urls = [c["media"]["image_url"] for c in pack]
+
+    async with aiohttp.ClientSession() as session:
+        images = await asyncio.gather(*[fetch_image(session, u) for u in urls])
+
+    canvas_w = CARD_W * 7
+    canvas_h = CARD_H * 2
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 255))
+
+    # Row 1 — 7 commons
+    for i, img in enumerate(images[:7]):
+        canvas.paste(img, (i * CARD_W, 0))
+
+    # Row 2 left — 3 uncommons
+    for i, img in enumerate(images[7:10]):
+        canvas.paste(img, (i * CARD_W, CARD_H))
+
+    # Row 2 right — foil + 2 rares (right-aligned in the 7-card-wide row)
+    for i, img in enumerate(images[10:13]):
+        x = (4 + i) * CARD_W
+        canvas.paste(img, (x, CARD_H))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename="pack.png")
 
 async def get_cards_by_set_and_type(session, set_id: str, card_type: str) -> list:
     url = "https://api.riftcodex.com/cards"
@@ -262,6 +345,7 @@ class Quests(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         print('Bot is online.')
+        await get_all_cards()  # Warm the card cache on startup
 
     @commands.Cog.listener()
     async def on_connect(self):
@@ -374,7 +458,7 @@ class Quests(commands.Cog):
         await ctx.send("Okay! Here are your rewards: " + str(curr_quest_xp) + "XP.")
 
     # Command to generate a riftbound pack.
-    @commands.command(name='generateriftboundpack')
+    @commands.command(name='generateriftboundpack', aliases = ['riftpack', 'riftboundpack'])
     async def gen_riftbound(self, ctx, type: Optional[str]): 
         await self._register_profile(ctx.author)
         target = ctx.author
@@ -386,13 +470,8 @@ class Quests(commands.Cog):
         else: 
             pack = await make_pack('SFD')
 
-        # Create embeds for the pack
-        embeds = return_embeds(pack)
-
-        # Send embeds in batches of 10 since discord has a limit of 10 embeds per message
-        # await ctx.send(embeds=embeds)
-        await ctx.send(embeds=embeds[0:10])
-        await ctx.send(embeds=embeds[10:13])
+        pack_image = await build_pack_image(pack)
+        await ctx.send(file=pack_image)
 
     # Registers the user if they don't have a profile. Otherwise, does nothing.
     async def _register_profile(self, user):
