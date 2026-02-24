@@ -144,6 +144,27 @@ async def get_all_cards() -> list:
 
     return all_cards
 
+def code_to_cards(all_cards: list, code: str) -> list:
+    """Convert a card code string to a list of card dictionaries."""
+    card_codes = code.split(" ")
+    cards = [code_to_card(all_cards, code) for code in card_codes]
+    missing = [card_codes[i] for i, c in enumerate(cards) if c is None]
+    if missing:
+        print(f"[code_to_cards] Could not find cards for codes: {missing}")
+    return [c for c in cards if c is not None]
+
+def clean_card_code(code: str) -> str:
+    """Clean a card code string."""
+    if "/" in code:
+        return code.split("/")[0].strip()
+    if code.endswith("-1"): # SFD-123-1 -> SFD-123
+        return code[:-2].strip()
+    return code.strip()
+
+def code_to_card(all_cards: list, code: str) -> dict:
+    """Convert a card code to a card dictionary."""
+    return next((c for c in all_cards if clean_card_code(c["public_code"]) == clean_card_code(code)), None)
+
 
 def filter_by_set(cards: list, set_id: str) -> list:
     """Filter cards by set ID."""
@@ -261,17 +282,24 @@ async def fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image:
     return img
 
 
-async def build_pack_image(pack: list) -> discord.File:
+async def build_pack_image(pack: list, extra_card: Optional[dict] = None) -> discord.File:
     """
     Layout (13 cards):
       Row 1: cards 0-6  (7 commons, left-to-right)
       Row 2: cards 7-9  (3 uncommons, left-aligned)
+             extra_card  (center, position 3, optional)
              cards 10-12 (foil + 2 rares, right-aligned)
     """
     urls = [c["media"]["image_url"] for c in pack]
 
     async with aiohttp.ClientSession() as session:
-        images = await asyncio.gather(*[fetch_image(session, u) for u in urls])
+        fetch_tasks = [fetch_image(session, u) for u in urls]
+        if extra_card:
+            fetch_tasks.append(fetch_image(session, extra_card["media"]["image_url"]))
+        fetched = await asyncio.gather(*fetch_tasks)
+
+    images = list(fetched[:13])
+    extra_img = fetched[13] if extra_card else None
 
     canvas_w = CARD_W * 7
     canvas_h = CARD_H * 2
@@ -285,6 +313,10 @@ async def build_pack_image(pack: list) -> discord.File:
     for i, img in enumerate(images[7:10]):
         canvas.paste(img, (i * CARD_W, CARD_H))
 
+    # Row 2 center — extra card
+    if extra_img:
+        canvas.paste(extra_img, (3 * CARD_W, CARD_H))
+
     # Row 2 right — foil + 2 rares (right-aligned in the 7-card-wide row)
     for i, img in enumerate(images[10:13]):
         x = (4 + i) * CARD_W
@@ -294,6 +326,37 @@ async def build_pack_image(pack: list) -> discord.File:
     canvas.save(buf, format="PNG")
     buf.seek(0)
     return discord.File(buf, filename="pack.png")
+
+async def build_precon_pack_image(pack: list) -> discord.File:
+    """
+    Layout (28 cards):
+      Row 1: cards 0-6   (7 cards)
+      Row 2: cards 7-13  (7 cards)
+      Row 3: cards 14-20 (7 cards)
+      Row 4: cards 21-27 (7 cards)
+    """
+    urls = [c["media"]["image_url"] for c in pack]
+
+    async with aiohttp.ClientSession() as session:
+        fetched = await asyncio.gather(*[fetch_image(session, u) for u in urls])
+
+    images = list(fetched[:28])
+
+    canvas_w = CARD_W * 7
+    canvas_h = CARD_H * 4
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 255))
+
+    for row in range(4):
+        for col in range(7):
+            idx = row * 7 + col
+            if idx < len(images):
+                canvas.paste(images[idx], (col * CARD_W, row * CARD_H))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename="precon.png")
+
 
 async def get_cards_by_set_and_type(session, set_id: str, card_type: str) -> list:
     url = "https://api.riftcodex.com/cards"
@@ -461,17 +524,49 @@ class Quests(commands.Cog):
     @commands.command(name='generateriftboundpack', aliases = ['riftpack', 'riftboundpack'])
     async def gen_riftbound(self, ctx, type: Optional[str]): 
         await self._register_profile(ctx.author)
-        target = ctx.author
-        pack = []
-        
-        # Generate a pack
-        if (type == 'origins'):
-            pack = await make_pack('OGN')
-        else: 
-            pack = await make_pack('SFD')
-
+        set_id = 'OGN' if type == 'origins' else 'SFD'
+        pack = await make_pack(set_id)
         pack_image = await build_pack_image(pack)
         await ctx.send(file=pack_image)
+
+
+    PRECONS = [
+        # Irelia
+        "SFD-195-1 SFD-220-1 SFD-124-1 SFD-034-1 SFD-036-1 SFD-045-1 SFD-130-1 SFD-038-1 SFD-039-1 SFD-133-1 SFD-048-1 SFD-125-1 SFD-137-1 SFD-141-1 SFD-127-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1",
+        # Jax
+        "SFD-193-1 SFD-213-1 SFD-033-1 SFD-040-1 SFD-041-1 SFD-042-1 SFD-095-1 SFD-098-1 SFD-102-1 SFD-107-1 SFD-037-1 SFD-093-1 SFD-054-1 SFD-092-1 SFD-035-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
+        # Rek'Sai
+        "SFD-187-1 SFD-217-1 SFD-003-1 SFD-004-1 SFD-018-1 SFD-151-1 SFD-159-1 SFD-006-1 SFD-010-1 SFD-015-1 SFD-156-1 SFD-157-1 SFD-161-1 SFD-164-1 SFD-170-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
+        # Lucian
+        "SFD-183-1 SFD-218-1 SFD-009-1 SFD-097-1 SFD-108-1 SFD-001-1 SFD-007-1 SFD-011-1 SFD-016-1 SFD-095-1 SFD-099-1 SFD-096-1 SFD-107-1 SFD-113-1 SFD-002-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
+        # Renata
+        "SFD-201-1 SFD-214-1 SFD-063-1 SFD-064-1 SFD-069-1 SFD-155-1 SFD-162-1 SFD-070-1 SFD-074-1 SFD-154-1 SFD-072-1 SFD-171-1 SFD-158-1 SFD-165-1 SFD-152-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
+        # Ezreal
+        "SFD-199-1 SFD-215-1 SFD-122-1 SFD-124-1 SFD-066-1 SFD-069-1 SFD-129-1 SFD-138-1 SFD-067-1 SFD-070-1 SFD-078-1 SFD-126-1 SFD-077-1 SFD-082-1 SFD-132-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1",
+    ]
+    YONE = "SFD-116-1"
+
+    # Command to generate a sealed pool (1 precon + 5 packs).
+    @commands.command(name='sealed')
+    async def gen_sealed(self, ctx, type: Optional[str]):
+        await self._register_profile(ctx.author)
+        set_id = 'OGN' if type == 'origins' else 'SFD'
+        packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
+
+        precon_code = random.choice(self.PRECONS) + " " + self.YONE
+        all_cards = await get_all_cards()
+        precon_pack = code_to_cards(all_cards, precon_code)
+
+        precon_image = build_precon_pack_image(precon_pack)
+        other_images = [build_pack_image(pack) for pack in packs]
+        images = await asyncio.gather(precon_image, *other_images)
+
+        card_codes = []
+        for pack in (packs + [precon_pack]):
+            for card in pack:
+                card_codes.append(clean_card_code(card["public_code"]))
+        export_code = " ".join(card_codes)
+        await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
 
     # Registers the user if they don't have a profile. Otherwise, does nothing.
     async def _register_profile(self, user):
