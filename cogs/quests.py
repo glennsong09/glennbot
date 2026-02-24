@@ -3,6 +3,7 @@ import random
 import math
 from discord.ext import commands
 from discord.ext.commands import BucketType, cooldown
+from discord import app_commands
 from typing import Optional
 from database import db
 from datetime import timedelta
@@ -34,21 +35,6 @@ announcements = ['Say 1 thing that made you happy today',
 easy_quests = sitdown_quests
 normal_quests = sitdown_quests + standup_quests
 hard_quests = standup_quests
-
-good_morning_roulette = ['Have a great day!',
-                         'Rise and shine!',
-                         'Hope your day goes well!',
-                         'Enjoy your day!']
-good_night_roulette = ['Sleep well!',
-                       'Don\'t let the bed bugs bite!',
-                       'Sweet dreams!',
-                       'Sleep tight!',
-                       'See you tomorrow!']
-gm_cd_roulette = ['Good morning again!',
-                  'We\'ve already said good morning!']
-gn_cd_roulette = ['Good night again!',
-                  'We\'ve already said good night!',
-                  'Do you miss me or something? Dummy... go to bed!']
 
 # Assigns a quest a random value for how many the user has to do.
 def give_int(quest):
@@ -117,106 +103,39 @@ class Quests(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print('Bot is online.')
-
-    @commands.Cog.listener()
-    async def on_connect(self):
-        print('Bot is connected.')
-
-    # Hello command.
-    @commands.command(name='hello', aliases = ['hi', 'heya', 'hihi', 'Hello', 'HELLO', 'hai'])
-    async def hello(self, ctx):
-        await self._register_profile(ctx.author)
-        await ctx.send(f"Hello, {ctx.author.mention}!")
-
-    ''' # Hello command.
-    @commands.command()
-    async def hello(self, ctx):
-        await self._register_profile(ctx.author)
-        await ctx.send(f"Hello, {ctx.author.mention}!") '''
-
-    # Goodbye command.
-    @commands.command(name='bye', aliases = ['Bye', 'byebye', 'BYE', 'bai', 'baibai'])
-    async def bye(self, ctx):
-        await self._register_profile(ctx.author)
-        await ctx.send(f'Bye, {ctx.author.mention}!')
-
-    # Thanks command.
-    @commands.command(name='thanks', aliases = ['ty', 'Thanks', 'TY'])
-    async def thanks(self, ctx):
-        await self._register_profile(ctx.author)
-        await ctx.send(f'You\'re welcome, {ctx.author.mention}! ^^')
-
-    # Good morning command 
-    # TODO: Need to check if time is before 12 pm in the person's timezone
-    @commands.command(name='goodmorning', aliases = ['gm', 'GM'])
-    @cooldown(1, 57600, BucketType.user)
-    async def goodmorning(self, ctx):
-        await self._register_profile(ctx.author)
-        #curr_time = datetime.now()
-        #curr_time_str = curr_time.strftime("%H:%M:%S")
-        #print("Current Time =", curr_time_str)
-        target = ctx.author
-        curr_xp = db.record("SELECT exp FROM profiles WHERE user_id=?", target.id)[0]
-        db.execute("UPDATE profiles SET exp = ? WHERE user_id=?", (curr_xp + 10), target.id)
-        gm_statement = random.choice(good_morning_roulette)
-        await ctx.send(f'{ctx.author.mention} ' + gm_statement)
-
-    # Good night command
-    # TODO:  Need to check if time is before 12 am in the person's timezone
-    @commands.command(name='goodnight', aliases = ['gn', 'GN'])
-    @cooldown(1, 57600, BucketType.user)
-    async def goodnight(self, ctx):
-        await self._register_profile(ctx.author)
-        #print(ctx.message.created_at)
-        target = ctx.author
-        curr_xp = db.record("SELECT exp FROM profiles WHERE user_id=?", target.id)[0]
-        db.execute("UPDATE profiles SET exp = ? WHERE user_id=?", (curr_xp + 10), target.id)
-        gn_statement = random.choice(good_night_roulette)
-        await ctx.send(f'{ctx.author.mention} ' + gn_statement)
-
-    # Focused work start command.
-    # TODO: bank for 2 hours of focused work, can ping start
-    #@commands.command(name='focusedworkstart', aliases = ['fwstart', 'Focusedworkstart'])
-    #async def quest(self, ctx): 
-        #return
-
-    # Focused work stop command.
-    # TODO: bank for 2 hours of focused work, can ping stop
-    #@commands.command(name='focusedwork', aliases = ['fwstop', 'Focusedworkstop'])
-    #async def quest(self, ctx): 
-        #return
-
     # Quest command.
     # TODO: make cd reset at a common time (user's time)
-    @commands.command(name='quest')
+    @commands.hybrid_command(name='quest', description="Get your daily quests!")
+    @app_commands.describe(quest_type="Quest difficulty: easy, normal, or hard")
+    @app_commands.choices(quest_type=[
+        app_commands.Choice(name="Easy", value="easy"),
+        app_commands.Choice(name="Normal", value="normal"),
+        app_commands.Choice(name="Hard", value="hard"),
+    ])
     @cooldown(1, 86400, BucketType.user)
-    async def quest(self, ctx, type: Optional[str]): 
+    async def quest(self, ctx, quest_type: Optional[str] = None):
         await self._register_profile(ctx.author)
         target = ctx.author
         final_quests = []
 
-        if (type == 'easy'):
+        if quest_type == 'easy':
             final_quests = make_quests(0)
-        elif (type == 'hard'):
+        elif quest_type == 'hard':
             final_quests = make_quests(2)
-        else: 
+        else:
             final_quests = make_quests(1)
 
         quest_statement = make_quest_statement(final_quests[0], final_quests[1])
         quest_db_statement = make_quest_db_entry(final_quests[0])
         db.execute("UPDATE profiles SET current_quest_exp = ? WHERE user_id=?", final_quests[1], target.id)
-        #db.execute("UPDATE profiles SET has_taken_quest = ? WHERE user_id=?", 1, target.id)
         db.execute("UPDATE profiles SET current_quest = ? WHERE user_id=?", quest_db_statement, target.id)
         db.commit()
         await ctx.send(f'{ctx.author.mention}\n' + quest_statement)
 
-    # Updates the db if the user has completed their quest. 
+    # Updates the db if the user has completed their quest.
     # TODO: different message if hasnt taken a quest yet that day vs has + trying to complete again
-    @commands.command(name='complete')
-    async def complete(self, ctx): 
+    @commands.hybrid_command(name='complete', description="Complete your current quest")
+    async def complete(self, ctx):
         await self._register_profile(ctx.author)
         target = ctx.author
         curr_xp = db.record("SELECT exp FROM profiles WHERE user_id=?", target.id)[0]
@@ -256,25 +175,8 @@ class Quests(commands.Cog):
             message = "Congratulations! You are now level " + str(new_level) + "!"
             await ctx.send(message)
     
-    # CD error message if user attempts to ping for multiple quests in a day.
     @quest.error
     async def on_quest_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             remaining_time = str(timedelta(seconds=int(error.retry_after)))
-            await ctx.send(f'{ctx.author.mention} Try again in ' + str(remaining_time + '.'))
-            #embed = discord.Embed(title="Cooldown Alert!", description=f'{ctx.author.mention}, you can use this command again in ' + str(remaining_time), color=0xE74C3C)
-            #await ctx.send(embed=embed)
-
-    # CD error message if user attempts to ping for multiple quests in a day.
-    @goodmorning.error
-    async def on_quest_error(self, ctx, error):
-        if isinstance(error, commands.CommandOnCooldown):
-            gm_cd_statement = random.choice(gm_cd_roulette)
-            await ctx.send(f'{ctx.author.mention} ' + gm_cd_statement)
-
-    # CD error message if user attempts to ping for multiple quests in a day.
-    @goodnight.error
-    async def on_quest_error(self, ctx, error):
-        if isinstance(error, commands.CommandOnCooldown):
-            gn_cd_statement = random.choice(gn_cd_roulette)
-            await ctx.send(f'{ctx.author.mention} ' + gn_cd_statement)
+            await ctx.send(f'{ctx.author.mention} Try again in {remaining_time}.')

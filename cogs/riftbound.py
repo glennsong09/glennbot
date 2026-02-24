@@ -3,22 +3,35 @@ import random
 import aiohttp
 import asyncio
 import io
-from aiocache import cached
-from aiocache.serializers import PickleSerializer
+import hashlib
+import time
+from pathlib import Path
 from PIL import Image
 
 from discord.ext import commands
+from discord import app_commands
 from typing import Optional
 from database import db
+
+
+# ---------------------------------------------------------------------------
+# Cache configuration
+# ---------------------------------------------------------------------------
+
+RESIZE_FACTOR = 0.5  # Scale down for faster generation (0.5 = half size)
+CACHE_DIR = Path(__file__).parent.parent / "cache" / "card_images"
+REFRESH_INTERVAL = 6 * 3600  # 6 hours
+
+_card_cache: Optional[list] = None
+_card_cache_time: float = 0
 
 
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
 
-@cached(ttl=3600, serializer=PickleSerializer())
-async def get_all_cards() -> list:
-    """Fetch all cards from the API. Results are cached for 1 hour."""
+async def _fetch_all_cards_from_api() -> list:
+    """Fetch all cards from the API (no cache)."""
     url = "https://api.riftcodex.com/cards"
     params = {"size": 50, "page": 1}
     all_cards = []
@@ -37,46 +50,15 @@ async def get_all_cards() -> list:
     return all_cards
 
 
-async def get_cards_by_set_and_type(session, set_id: str, card_type: str) -> list:
-    url = "https://api.riftcodex.com/cards"
-    params = {"size": 50, "page": 1}
-    all_cards = []
-
-    while True:
-        async with session.get(url, params=params) as resp:
-            data = await resp.json()
-
-        for card in data["items"]:
-            if (card["set"]["set_id"] == set_id and
-                    card["classification"]["type"] == card_type):
-                all_cards.append(card)
-
-        if data["page"] >= data["pages"]:
-            break
-        params["page"] += 1
-
-    return all_cards
-
-
-async def get_cards_by_set_and_rarity(session, set_id: str, rarity: str) -> list:
-    url = "https://api.riftcodex.com/cards"
-    params = {"size": 50, "page": 1}
-    all_cards = []
-
-    while True:
-        async with session.get(url, params=params) as resp:
-            data = await resp.json()
-
-        for card in data["items"]:
-            if (card["set"]["set_id"] == set_id and
-                    card["classification"]["rarity"] == rarity):
-                all_cards.append(card)
-
-        if data["page"] >= data["pages"]:
-            break
-        params["page"] += 1
-
-    return all_cards
+async def get_all_cards() -> list:
+    """Fetch all cards from the API. Results are cached for 6 hours."""
+    global _card_cache, _card_cache_time
+    now = time.time()
+    if _card_cache is not None and (now - _card_cache_time) < REFRESH_INTERVAL:
+        return _card_cache
+    _card_cache = await _fetch_all_cards_from_api()
+    _card_cache_time = now
+    return _card_cache
 
 
 # ---------------------------------------------------------------------------
@@ -192,18 +174,97 @@ async def make_pack(type):
 # Image building
 # ---------------------------------------------------------------------------
 
-CARD_W, CARD_H = 744, 1039
+_BASE_CARD_W, _BASE_CARD_H = 744, 1039
+CARD_W = int(_BASE_CARD_W * RESIZE_FACTOR)
+CARD_H = int(_BASE_CARD_H * RESIZE_FACTOR)
 
 
-async def fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image:
-    async with session.get(url) as resp:
-        data = await resp.read()
+def _url_to_cache_path(url: str) -> Path:
+    """Get the local cache file path for an image URL."""
+    key = hashlib.sha256(url.encode()).hexdigest()[:32]
+    return CACHE_DIR / f"{key}.png"
+
+
+def _process_image(data: bytes) -> Image.Image:
+    """Load raw image bytes and process to standard card format."""
     img = Image.open(io.BytesIO(data)).convert("RGBA")
     if img.width > img.height:
         img = img.rotate(90, expand=True)
     if img.size != (CARD_W, CARD_H):
         img = img.resize((CARD_W, CARD_H), Image.LANCZOS)
     return img
+
+
+def _load_from_cache(url: str) -> Optional[Image.Image]:
+    """Load a processed image from local cache if it exists."""
+    path = _url_to_cache_path(url)
+    if path.exists():
+        try:
+            return Image.open(path).convert("RGBA")
+        except Exception:
+            return None
+    return None
+
+
+async def fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image:
+    """Fetch card image, using local cache when available."""
+    cached = _load_from_cache(url)
+    if cached is not None:
+        return cached
+
+    async with session.get(url) as resp:
+        data = await resp.read()
+    img = _process_image(data)
+
+    # Save to cache for next time
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _url_to_cache_path(url)
+    img.save(path, format="PNG")
+
+    return img
+
+
+async def refresh_all_images() -> int:
+    """Fetch all card images and cache them locally. Returns count of images cached."""
+    all_cards = await _fetch_all_cards_from_api()
+    urls = list({c["media"]["image_url"] for c in all_cards if c.get("media", {}).get("image_url")})
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    async def download_one(session: aiohttp.ClientSession, url: str) -> bool:
+        path = _url_to_cache_path(url)
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return False
+                data = await resp.read()
+            img = _process_image(data)
+            img.save(path, format="PNG")
+            return True
+        except Exception as e:
+            print(f"[riftbound] Failed to cache image {url[:60]}...: {e}")
+            return False
+
+    sem = asyncio.Semaphore(20)  # Limit concurrent downloads
+
+    async def limited_download(session: aiohttp.ClientSession, url: str) -> bool:
+        async with sem:
+            return await download_one(session, url)
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*[limited_download(session, u) for u in urls])
+
+    return sum(1 for r in results if r)
+
+
+async def refresh_card_data_and_images() -> None:
+    """Refresh card data and all card images. Called every 6 hours."""
+    global _card_cache, _card_cache_time
+    print("[riftbound] Refreshing card data and images...")
+    _card_cache = await _fetch_all_cards_from_api()
+    _card_cache_time = time.time()
+    count = await refresh_all_images()
+    print(f"[riftbound] Cached {count} card images")
 
 
 async def build_pack_image(pack: list, extra_card: Optional[dict] = None) -> discord.File:
@@ -301,38 +362,71 @@ class Riftbound(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self._refresh_task: Optional[asyncio.Task] = None
+
+    async def _refresh_loop(self) -> None:
+        """Background task: refresh card data and images every 6 hours."""
+        while True:
+            await asyncio.sleep(REFRESH_INTERVAL)  # Sleep first; on_ready does initial refresh
+            try:
+                await refresh_card_data_and_images()
+            except Exception as e:
+                print(f"[riftbound] Refresh failed: {e}")
 
     @commands.Cog.listener()
     async def on_ready(self):
-        await get_all_cards()  # Warm the card cache on startup
+        # Initial refresh: card data + pre-fetch all images
+        await refresh_card_data_and_images()
+        # Start background refresh every 6 hours
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(self._refresh_loop())
 
-    @commands.command(name='generateriftboundpack', aliases=['riftpack', 'riftboundpack'])
-    async def gen_riftbound(self, ctx, type: Optional[str]):
-        await self._register_profile(ctx.author)
-        set_id = 'OGN' if type == 'origins' else 'SFD'
-        pack = await make_pack(set_id)
-        pack_image = await build_pack_image(pack)
+    @commands.hybrid_group(name="riftbound", description="Riftbound card game commands")
+    async def riftbound(self, ctx: commands.Context):
+        """Riftbound card game commands. Use `open` or `sealed` subcommands."""
+        await ctx.send_help(ctx.command)
+
+    @riftbound.command(name="open", description="Open a Riftbound pack")
+    @app_commands.describe(deck_type="Pack type: origins or spiritforged (default)")
+    @app_commands.choices(deck_type=[
+        app_commands.Choice(name="Origins", value="origins"),
+        app_commands.Choice(name="Spiritforged", value="spiritforged"),
+    ])
+    async def riftbound_open(self, ctx: commands.Context, deck_type: Optional[str] = None):
+        """Open a single Riftbound pack. Use !riftbound open or /riftbound open."""
+        async with ctx.typing():
+            await self._register_profile(ctx.author)
+            set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+            pack = await make_pack(set_id)
+            pack_image = await build_pack_image(pack)
         await ctx.send(file=pack_image)
 
-    @commands.command(name='sealed')
-    async def gen_sealed(self, ctx, type: Optional[str]):
-        await self._register_profile(ctx.author)
-        set_id = 'OGN' if type == 'origins' else 'SFD'
-        packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
+    @riftbound.command(name="sealed", description="Generate a sealed pool")
+    @app_commands.describe(deck_type="Pack type: origins or spiritforged (default)")
+    @app_commands.choices(deck_type=[
+        app_commands.Choice(name="Origins", value="origins"),
+        app_commands.Choice(name="Spiritforged", value="spiritforged"),
+    ])
+    async def riftbound_sealed(self, ctx: commands.Context, deck_type: Optional[str] = None):
+        """Generate a sealed pool. Use !riftbound sealed or /riftbound sealed."""
+        async with ctx.typing():
+            await self._register_profile(ctx.author)
+            set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+            packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
 
-        precon_code = random.choice(self.PRECONS) + " " + self.YONE
-        all_cards = await get_all_cards()
-        precon_pack = code_to_cards(all_cards, precon_code)
+            precon_code = random.choice(self.PRECONS) + " " + self.YONE
+            all_cards = await get_all_cards()
+            precon_pack = code_to_cards(all_cards, precon_code)
 
-        precon_image = build_precon_pack_image(precon_pack)
-        other_images = [build_pack_image(pack) for pack in packs]
-        images = await asyncio.gather(precon_image, *other_images)
+            precon_image = build_precon_pack_image(precon_pack)
+            other_images = [build_pack_image(pack) for pack in packs]
+            images = await asyncio.gather(precon_image, *other_images)
 
-        card_codes = []
-        for pack in (packs + [precon_pack]):
-            for card in pack:
-                card_codes.append(clean_card_code(card["public_code"]))
-        export_code = " ".join(card_codes)
+            card_codes = []
+            for pack in (packs + [precon_pack]):
+                for card in pack:
+                    card_codes.append(clean_card_code(card["public_code"]))
+            export_code = " ".join(card_codes)
         await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
 
     async def _register_profile(self, user):
