@@ -386,7 +386,7 @@ class Riftbound(commands.Cog):
         """Riftbound card game commands. Use `open` or `sealed` subcommands."""
         await ctx.send_help(ctx.command)
 
-    @riftbound.command(name="open", description="Open a Riftbound pack")
+    @riftbound.command(name="pack", description="Open a Riftbound pack")
     @app_commands.describe(deck_type="Pack type: origins or spiritforged (default)")
     @app_commands.choices(deck_type=[
         app_commands.Choice(name="Origins", value="origins"),
