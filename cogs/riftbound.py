@@ -460,11 +460,11 @@ class Riftbound(commands.Cog):
     ])
     async def riftbound_open(self, ctx: commands.Context, deck_type: Optional[str] = None):
         """Open a single Riftbound pack. Use !riftbound open or /riftbound open."""
-        async with ctx.typing():
-            await self._register_profile(ctx.author)
-            set_id = 'OGN' if deck_type == 'origins' else 'SFD'
-            pack = await make_pack(set_id)
-            pack_image = await build_pack_image(pack)
+        await ctx.defer()
+        await self._register_profile(ctx.author)
+        set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+        pack = await make_pack(set_id)
+        pack_image = await build_pack_image(pack)
         await ctx.send(file=pack_image)
 
     @riftbound.command(name="sealed", description="Generate a sealed pool")
@@ -475,24 +475,24 @@ class Riftbound(commands.Cog):
     ])
     async def riftbound_sealed(self, ctx: commands.Context, deck_type: Optional[str] = None):
         """Generate a sealed pool. Use !riftbound sealed or /riftbound sealed."""
-        async with ctx.typing():
-            await self._register_profile(ctx.author)
-            set_id = 'OGN' if deck_type == 'origins' else 'SFD'
-            packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
+        await ctx.defer()
+        await self._register_profile(ctx.author)
+        set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+        packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
 
-            precon_code = random.choice(self.PRECONS) + " " + self.YONE
-            all_cards = await get_all_cards()
-            precon_pack = code_to_cards(all_cards, precon_code)
+        precon_code = random.choice(self.PRECONS) + " " + self.YONE
+        all_cards = await get_all_cards()
+        precon_pack = code_to_cards(all_cards, precon_code)
 
-            precon_image = build_precon_pack_image(precon_pack)
-            other_images = [build_pack_image(pack) for pack in packs]
-            images = await asyncio.gather(precon_image, *other_images)
+        precon_image = build_precon_pack_image(precon_pack)
+        other_images = [build_pack_image(pack) for pack in packs]
+        images = await asyncio.gather(precon_image, *other_images)
 
-            card_codes = []
-            for pack in (packs + [precon_pack]):
-                for card in pack:
-                    card_codes.append(clean_card_code(card["public_code"]))
-            export_code = " ".join(card_codes)
+        card_codes = []
+        for pack in (packs + [precon_pack]):
+            for card in pack:
+                card_codes.append(clean_card_code(card["public_code"]))
+        export_code = " ".join(card_codes)
         await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
 
     async def _register_profile(self, user):
