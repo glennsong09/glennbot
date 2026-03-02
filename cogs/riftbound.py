@@ -225,9 +225,9 @@ async def make_pack(type):
     # 14th card is always token or rune
     luck = random.random()
     print("rune/tokens", luck)
-    if luck < (61 / 144):
+    if luck < (61 / 96):
         curr_card = random.choice(runes)
-    elif luck < (61 + 32) / 144:
+    elif luck < (61 + 32) / 96:
         curr_card = random.choice(tokens)
     else:
         curr_card = random.choice(alt_art_runes)
