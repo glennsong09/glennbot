@@ -122,6 +122,10 @@ async def make_pack(type):
         if c["metadata"]["overnumbered"] == True and c["metadata"]["signature"] == False
     ]
 
+    runes = [c for c in set_cards if c["classification"]["type"] == "Rune"]
+    alt_art_runes = [c for c in runes if c["metadata"]["alternate_art"] == True]
+    tokens = [c for c in set_cards if c["classification"]["supertype"] == "Token"]
+
     cards = []
 
     # 7 commons
@@ -133,12 +137,12 @@ async def make_pack(type):
         cards.append(random.choice(uncommons))
 
     # 1 foil of any rarity
-    while len(cards) < 11:
-        luck = random.randint(1, 720)
+    '''while len(cards) < 11:
+        luck = random.randint(1, 2160)
         print("foil", luck)
         if luck == 1:
             curr_card = random.choice(signatures)
-        elif luck <= 11:
+        elif luck <= 31:
             curr_card = random.choice(overnumbered)
         elif luck <= 71:
             curr_card = random.choice(alt_arts)
@@ -147,9 +151,21 @@ async def make_pack(type):
         else:
             curr_card = random.choice(rares + uncommons + commons)
         print(curr_card)
-        cards.append(curr_card)
+        cards.append(curr_card)'''
+    
+    # 11th card is foil slot
+    luck = random.random()
+    print("foil", luck)
+    if luck < 73 / 144:
+        curr_card = random.choice(commons)
+    elif luck < (73 + 44) / 144:
+        curr_card = random.choice(uncommons)
+    else:
+        curr_card = random.choice(rares)
+    print(curr_card)
+    cards.append(curr_card)
 
-    # 2 rares or better
+    '''# 2 rares or better
     while len(cards) < 13:
         luck = random.randint(1, 720)
         print("rare", luck)
@@ -164,7 +180,54 @@ async def make_pack(type):
         else:
             curr_card = random.choice(rares)
         print(curr_card)
-        cards.append(curr_card)
+        cards.append(curr_card)'''
+    
+    # 12th card is always rare 
+    curr_card = random.choice(rares)
+
+    '''# 13th card is rare or better
+    luck = random.randint(1, 720)
+    print("rare", luck)
+    if luck == 1:
+        curr_card = random.choice(signatures)
+    elif luck <= 11:
+        curr_card = random.choice(overnumbered)
+    elif luck <= 71:
+        curr_card = random.choice(alt_arts)
+    elif luck <= 251:
+        curr_card = random.choice(epics)
+    else:
+        curr_card = random.choice(rares)
+    print(curr_card)
+    cards.append(curr_card)'''
+
+    # 13th card is always rare or better foil
+    luck = random.random()
+    print("foil", luck)
+    if luck < (91 / 144):
+        curr_card = random.choice(rares)
+    elif luck < (91 + 35) / 144:
+        curr_card = random.choice(epics)
+    elif luck < (91 + 35 + 13) / 144:
+        curr_card = random.choice(alt_arts)
+    elif luck < (91 + 35 + 13 + 4) / 144:
+        curr_card = random.choice(overnumbered)
+    else:
+        curr_card = random.choice(signatures)
+    print(curr_card)
+    cards.append(curr_card)
+
+    # 14th card is always token or rune
+    luck = random.random()
+    print("rune/tokens", luck)
+    if luck < (61 / 144):
+        curr_card = random.choice(runes)
+    elif luck < (61 + 32) / 144:
+        curr_card = random.choice(tokens)
+    else:
+        curr_card = random.choice(alt_art_runes)
+    print(curr_card)
+    cards.append(curr_card)
 
     print("---")
     return cards
