@@ -126,8 +126,7 @@ async def make_pack(type):
     runes = [c for c in set_cards if c["classification"]["type"] == "Rune" 
                 and c["classification"]["rarity"] == "Common"]
     tokens = [c for c in set_cards if (c["classification"]["type"] == "Token")]
-    alt_art_runes = [c for c in showcases if ((c["metadata"]["alternate_art"] == True) 
-                        and (c["classification"]["type"] == "Rune"))]
+    alt_art_runes = [c for c in showcases if c["classification"]["type"] == "Rune"]
 
     cards = []
 
