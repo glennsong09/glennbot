@@ -182,8 +182,10 @@ async def make_pack(type):
         print(curr_card)
         cards.append(curr_card)'''
     
-    # 12th card is always rare 
+    # 12th card is always rare
     curr_card = random.choice(rares)
+    print(curr_card)
+    cards.append(curr_card)
 
     '''# 13th card is rare or better
     luck = random.randint(1, 720)
@@ -330,24 +332,21 @@ async def refresh_card_data_and_images() -> None:
     print(f"[riftbound] Cached {count} card images")
 
 
-async def build_pack_image(pack: list, extra_card: Optional[dict] = None) -> discord.File:
+async def build_pack_image(pack: list) -> discord.File:
     """
-    Layout (13 cards):
-      Row 1: cards 0-6  (7 commons, left-to-right)
-      Row 2: cards 7-9  (3 uncommons, left-aligned)
-             extra_card  (center, position 3, optional)
-             cards 10-12 (foil + 2 rares, right-aligned)
+    Layout (14 cards):
+      Row 1: cards 0-6   (7 commons, left-to-right)
+      Row 2: cards 7-9   (3 uncommons, columns 0-2)
+             card 10     (foil, column 3)
+             cards 11-12 (2 rares, columns 4-5)
+             card 13     (token/rune, column 6)
     """
     urls = [c["media"]["image_url"] for c in pack]
 
     async with aiohttp.ClientSession() as session:
-        fetch_tasks = [fetch_image(session, u) for u in urls]
-        if extra_card:
-            fetch_tasks.append(fetch_image(session, extra_card["media"]["image_url"]))
-        fetched = await asyncio.gather(*fetch_tasks)
+        fetched = await asyncio.gather(*[fetch_image(session, u) for u in urls])
 
-    images = list(fetched[:13])
-    extra_img = fetched[13] if extra_card else None
+    images = list(fetched)
 
     canvas_w = CARD_W * 7
     canvas_h = CARD_H * 2
@@ -359,11 +358,12 @@ async def build_pack_image(pack: list, extra_card: Optional[dict] = None) -> dis
     for i, img in enumerate(images[7:10]):
         canvas.paste(img, (i * CARD_W, CARD_H))
 
-    if extra_img:
-        canvas.paste(extra_img, (3 * CARD_W, CARD_H))
+    canvas.paste(images[10], (3 * CARD_W, CARD_H))
 
-    for i, img in enumerate(images[10:13]):
+    for i, img in enumerate(images[11:13]):
         canvas.paste(img, ((4 + i) * CARD_W, CARD_H))
+
+    canvas.paste(images[13], (6 * CARD_W, CARD_H))
 
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")
