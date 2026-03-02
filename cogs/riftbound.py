@@ -116,15 +116,17 @@ async def make_pack(type):
     showcases = filter_by_rarity(set_cards, "Showcase")
 
     signatures = [c for c in showcases if c["metadata"]["signature"] == True]
-    alt_arts = [c for c in showcases if c["metadata"]["alternate_art"] == True]
+    alt_arts = [c for c in showcases if ((c["metadata"]["alternate_art"] == True) 
+                    and (c["classification"]["type"] != "Rune"))]
     overnumbered = [
         c for c in showcases
         if c["metadata"]["overnumbered"] == True and c["metadata"]["signature"] == False
     ]
 
-    runes = [c for c in set_cards if c["classification"]["type"] == "Rune"]
-    alt_art_runes = [c for c in runes if c["metadata"]["alternate_art"] == True]
-    tokens = [c for c in set_cards if c["classification"]["supertype"] == "Token"]
+    runes = [c for c in commons if c["classification"]["type"] == "Rune"]
+    tokens = [c for c in set_cards if (c["classification"]["type"] == "Token")]
+    alt_art_runes = [c for c in showcases if ((c["metadata"]["alternate_art"] == True) 
+                        and (c["classification"]["type"] == "Rune"))]
 
     cards = []
 
