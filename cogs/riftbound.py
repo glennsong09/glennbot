@@ -138,23 +138,6 @@ async def make_pack(type):
     # 3 uncommons
     while len(cards) < 10:
         cards.append(random.choice(uncommons))
-
-    # 1 foil of any rarity
-    '''while len(cards) < 11:
-        luck = random.randint(1, 2160)
-        print("foil", luck)
-        if luck == 1:
-            curr_card = random.choice(signatures)
-        elif luck <= 31:
-            curr_card = random.choice(overnumbered)
-        elif luck <= 71:
-            curr_card = random.choice(alt_arts)
-        elif luck <= 251:
-            curr_card = random.choice(epics)
-        else:
-            curr_card = random.choice(rares + uncommons + commons)
-        print(curr_card)
-        cards.append(curr_card)'''
     
     # 11th card is foil slot
     luck = random.random()
@@ -167,44 +150,11 @@ async def make_pack(type):
         curr_card = random.choice(rares)
     print(curr_card)
     cards.append(curr_card)
-
-    '''# 2 rares or better
-    while len(cards) < 13:
-        luck = random.randint(1, 720)
-        print("rare", luck)
-        if luck == 1:
-            curr_card = random.choice(signatures)
-        elif luck <= 11:
-            curr_card = random.choice(overnumbered)
-        elif luck <= 71:
-            curr_card = random.choice(alt_arts)
-        elif luck <= 251:
-            curr_card = random.choice(epics)
-        else:
-            curr_card = random.choice(rares)
-        print(curr_card)
-        cards.append(curr_card)'''
     
     # 12th card is always rare
     curr_card = random.choice(rares)
     print(curr_card)
     cards.append(curr_card)
-
-    '''# 13th card is rare or better
-    luck = random.randint(1, 720)
-    print("rare", luck)
-    if luck == 1:
-        curr_card = random.choice(signatures)
-    elif luck <= 11:
-        curr_card = random.choice(overnumbered)
-    elif luck <= 71:
-        curr_card = random.choice(alt_arts)
-    elif luck <= 251:
-        curr_card = random.choice(epics)
-    else:
-        curr_card = random.choice(rares)
-    print(curr_card)
-    cards.append(curr_card)'''
 
     # 13th card is always rare or better foil
     luck = random.random()
@@ -475,6 +425,34 @@ class Riftbound(commands.Cog):
     ])
     async def riftbound_sealed(self, ctx: commands.Context, deck_type: Optional[str] = None):
         """Generate a sealed pool. Use !riftbound sealed or /riftbound sealed."""
+        await ctx.defer()
+        await self._register_profile(ctx.author)
+        set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+        packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
+
+        precon_code = random.choice(self.PRECONS) + " " + self.YONE
+        all_cards = await get_all_cards()
+        precon_pack = code_to_cards(all_cards, precon_code)
+
+        precon_image = build_precon_pack_image(precon_pack)
+        other_images = [build_pack_image(pack) for pack in packs]
+        images = await asyncio.gather(precon_image, *other_images)
+
+        card_codes = []
+        for pack in (packs + [precon_pack]):
+            for card in pack:
+                card_codes.append(clean_card_code(card["public_code"]))
+        export_code = " ".join(card_codes)
+        await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
+
+    @riftbound.command(name="draft", description="Start a draft game")
+    @app_commands.describe(deck_type="Pack type: origins or spiritforged (default)")
+    @app_commands.choices(deck_type=[
+        app_commands.Choice(name="Origins", value="origins"),
+        app_commands.Choice(name="Spiritforged", value="spiritforged"),
+    ])
+    async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[str] = None):
+        """Generate a draft pool. Use !riftbound draft or /riftbound draft."""
         await ctx.defer()
         await self._register_profile(ctx.author)
         set_id = 'OGN' if deck_type == 'origins' else 'SFD'

@@ -41,6 +41,11 @@ class General(commands.Cog):
         await self._register_profile(ctx.author)
         await ctx.send(f"Hello, {ctx.author.mention}!")
 
+    @commands.hybrid_command(name='dm', aliases=['DM'], description="DM me!")
+    async def dm(self, ctx):
+        await self._register_profile(ctx.author)
+        await ctx.author.send("Hello from the bot!")
+
     @commands.hybrid_command(name='bye', aliases=['byebye', 'bai', 'baibai'], description="Say goodbye!")
     async def bye(self, ctx):
         await self._register_profile(ctx.author)
