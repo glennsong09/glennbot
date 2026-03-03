@@ -1,3 +1,5 @@
+import asyncio
+
 import discord
 import random
 from discord.ext import commands
@@ -44,7 +46,9 @@ class General(commands.Cog):
     @commands.hybrid_command(name='dm', aliases=['DM'], description="DM me!")
     async def dm(self, ctx):
         await self._register_profile(ctx.author)
-        await ctx.author.send("Hello from the bot!")
+        msg = await ctx.author.send("Hello from the bot!")
+        await asyncio.sleep(5)
+        await msg.delete()
 
     @commands.hybrid_command(name='bye', aliases=['byebye', 'bai', 'baibai'], description="Say goodbye!")
     async def bye(self, ctx):
