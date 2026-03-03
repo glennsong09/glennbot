@@ -50,6 +50,14 @@ class General(commands.Cog):
         await asyncio.sleep(5)
         await msg.delete()
 
+    @bot.command()
+    async def notify(ctx, *users: discord.Member):
+        for user in users:
+            try:
+                await user.send("Hello there!")
+            except discord.Forbidden:
+                await ctx.send(f"Could not DM {user.mention} (DMs disabled)")
+
     @commands.hybrid_command(name='bye', aliases=['byebye', 'bai', 'baibai'], description="Say goodbye!")
     async def bye(self, ctx):
         await self._register_profile(ctx.author)

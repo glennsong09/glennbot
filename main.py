@@ -15,7 +15,6 @@ token = os.getenv("TOKEN")
 
 GUILD_ID = 938505162593542155
 
-
 async def setup_hook():
     for filename in os.listdir('./cogs'):
         if filename.endswith('.py'):
