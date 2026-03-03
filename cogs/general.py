@@ -50,7 +50,7 @@ class General(commands.Cog):
         await asyncio.sleep(5)
         await msg.delete()
 
-    @bot.command()
+    @commands.hybrid_command(name='notify', aliases=['NOTIFY'], description="DM a list of users")
     async def notify(ctx, *users: discord.Member):
         for user in users:
             try:
