@@ -50,11 +50,13 @@ class General(commands.Cog):
         await asyncio.sleep(5)
         await msg.delete()
 
-    @commands.hybrid_command(name='notify', aliases=['NOTIFY'], description="DM a list of users")
-    async def notify(ctx, *users: discord.Member):
+    @commands.command(name='notify', aliases=['NOTIFY'], description="DM a list of users")
+    async def notify(self, ctx, *users: discord.Member):
         for user in users:
             try:
-                await user.send("Hello there!")
+                msg = await user.send(f"Hello from the bot, {user.mention}!")
+                await asyncio.sleep(5)
+                await msg.delete()
             except discord.Forbidden:
                 await ctx.send(f"Could not DM {user.mention} (DMs disabled)")
 

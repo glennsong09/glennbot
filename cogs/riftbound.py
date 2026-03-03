@@ -356,6 +356,88 @@ async def build_precon_pack_image(pack: list) -> discord.File:
 
 
 # ---------------------------------------------------------------------------
+# Converters
+# ---------------------------------------------------------------------------
+
+class DeckTypeConverter(commands.Converter):
+    async def convert(self, _ctx, argument):
+        if argument.lower() in ('origins', 'spiritforged'):
+            return argument.lower()
+        raise commands.BadArgument()
+
+
+# ---------------------------------------------------------------------------
+# Draft helpers
+# ---------------------------------------------------------------------------
+
+class DraftBarrier:
+    """Blocks until all expected players have signalled ready."""
+    def __init__(self, player_ids: list):
+        self._ids = set(player_ids)
+        self._ready: set = set()
+        self._event = asyncio.Event()
+
+    def reset(self):
+        self._ready.clear()
+        self._event.clear()
+
+    async def player_ready(self, user_id: int):
+        self._ready.add(user_id)
+        if self._ready >= self._ids:
+            self._event.set()
+
+    async def wait(self):
+        await self._event.wait()
+
+
+PACK_ASSET = Path(__file__).parent.parent / "assets" / "sfd_pack.jpg"
+
+
+class PackSelectView(discord.ui.View):
+    def __init__(self, barrier: DraftBarrier, user_id: int):
+        super().__init__(timeout=600)
+        self.barrier = barrier
+        self.user_id = user_id
+
+    async def _pick(self, interaction: discord.Interaction, pack_num: int):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your choice to make!", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=f"You chose Pack {pack_num}! Waiting for other players...", view=self)
+        await self.barrier.player_ready(self.user_id)
+
+    @discord.ui.button(label="Pack 1", style=discord.ButtonStyle.primary)
+    async def pack1(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self._pick(interaction, 1)
+
+    @discord.ui.button(label="Pack 2", style=discord.ButtonStyle.primary)
+    async def pack2(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self._pick(interaction, 2)
+
+    @discord.ui.button(label="Pack 3", style=discord.ButtonStyle.primary)
+    async def pack3(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self._pick(interaction, 3)
+
+
+class ReadyView(discord.ui.View):
+    def __init__(self, barrier: DraftBarrier, user_id: int):
+        super().__init__(timeout=600)
+        self.barrier = barrier
+        self.user_id = user_id
+
+    @discord.ui.button(label="Ready", style=discord.ButtonStyle.green)
+    async def ready(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your button!", ephemeral=True)
+            return
+        button.disabled = True
+        await interaction.response.edit_message(content="You're ready! Waiting for other players...", view=self)
+        await self.barrier.player_ready(self.user_id)
+
+
+# ---------------------------------------------------------------------------
 # Riftbound cog
 # ---------------------------------------------------------------------------
 
@@ -445,33 +527,55 @@ class Riftbound(commands.Cog):
         export_code = " ".join(card_codes)
         await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
 
-    @riftbound.command(name="draft", description="Start a draft game")
-    @app_commands.describe(deck_type="Pack type: origins or spiritforged (default)")
-    @app_commands.choices(deck_type=[
-        app_commands.Choice(name="Origins", value="origins"),
-        app_commands.Choice(name="Spiritforged", value="spiritforged"),
-    ])
-    async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[str] = None):
-        """Generate a draft pool. Use !riftbound draft or /riftbound draft."""
-        await ctx.defer()
+    @riftbound.command(name="draft", description="Start a draft game", with_app_command=False)
+    async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[DeckTypeConverter] = None, *users: discord.Member):
+        """Start a draft. Use !riftbound draft [origins|spiritforged] @player1 @player2 ..."""
         await self._register_profile(ctx.author)
         set_id = 'OGN' if deck_type == 'origins' else 'SFD'
-        packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
+        players = list(users)
 
-        precon_code = random.choice(self.PRECONS) + " " + self.YONE
-        all_cards = await get_all_cards()
-        precon_pack = code_to_cards(all_cards, precon_code)
+        # Ensure there are players mentioned
+        if not players:
+            await ctx.send("Please mention at least one player!")
+            return
+        
+        # Ensure none of the players are bots, so we don't try to DM them and fail the draft start
+        for player in players:
+            if player.bot:
+                await ctx.send(f"Cannot include bot {player.mention} in draft.")
+                return
+        
+        # Ensure all players have DMs open
+        for player in players:
+            try:
+                msg = await player.send(f"We are about to begin Riftbound draft, {player.mention}.")
+            except discord.Forbidden:
+                await ctx.send(f"Could not DM {player.mention} (DMs disabled)") 
+                return
 
-        precon_image = build_precon_pack_image(precon_pack)
-        other_images = [build_pack_image(pack) for pack in packs]
-        images = await asyncio.gather(precon_image, *other_images)
+        # If we got here, all players are valid and have DMs open
+        await ctx.send(f"Draft started! Generating packs for {', '.join(p.mention for p in players)}...")
 
-        card_codes = []
-        for pack in (packs + [precon_pack]):
-            for card in pack:
-                card_codes.append(clean_card_code(card["public_code"]))
-        export_code = " ".join(card_codes)
-        await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
+        # Generate 3 packs per player
+        player_packs = {}
+        for player in players:
+            player_packs[player.id] = await asyncio.gather(*[make_pack(set_id) for _ in range(3)])
+
+        # Build all pack images
+        '''player_images = {}
+        for player in players:
+            player_images[player.id] = await asyncio.gather(*[build_pack_image(p) for p in player_packs[player.id]])'''
+
+        # DM each player their 3 packs, then a pack select view
+        barrier = DraftBarrier([p.id for p in players])
+        for player in players:
+            pack_files = [discord.File(PACK_ASSET, filename=f"pack{i+1}.jpg") for i in range(3)]
+            view = PackSelectView(barrier, player.id)
+            await player.send("Which pack do you want to open first?", files=pack_files, view=view)
+
+        await ctx.send("Packs sent! Waiting for all players to ready up...")
+        await barrier.wait()
+        await ctx.send("All players are ready!")
 
     async def _register_profile(self, user):
         if db.record("SELECT * FROM profiles WHERE user_id = ?", user.id) == None:
