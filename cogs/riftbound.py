@@ -1,10 +1,12 @@
 import discord
 import random
+import re
 import aiohttp
 import asyncio
 import io
 import hashlib
 import time
+from collections import Counter
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
@@ -390,6 +392,72 @@ async def build_precon_pack_image(pack: list) -> discord.File:
 
 
 # ---------------------------------------------------------------------------
+# Sealed pool formatting
+# ---------------------------------------------------------------------------
+
+def _format_sealed_pool(cards: list) -> list[str]:
+    """Group cards by type and return a list of message-safe chunks (<= 2000 chars each)."""
+    groups: dict[str, list] = {
+        "Legend": [],
+        "Champion": [],
+        "MainDeck": [],
+        "Battlefields": [],
+        "Gear": [],
+        "Runes": [],
+    }
+
+    for card in cards:
+        classification = card.get("classification") or {}
+        card_type = classification.get("type") or ""
+        supertype = classification.get("supertype") or ""
+        raw_name = card.get("name") or "Unknown"
+
+        if supertype == "Token" or "// Buff" in raw_name:
+            continue
+
+        name = raw_name.replace(" - ", ", ")
+        name = re.sub(r"\s*\(Overnumbered\)", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\s*\(Alternate Art\)", "", name, flags=re.IGNORECASE)
+
+        if card_type == "Rune":
+            groups["Runes"].append(name)
+        elif card_type == "Battlefield":
+            groups["Battlefields"].append(name)
+        elif card_type == "Gear":
+            groups["Gear"].append(name)
+        elif supertype == "Legend" or card_type == "Legend":
+            groups["Legend"].append(name)
+        elif "Champion" in card_type or "Champion" in supertype:
+            groups["Champion"].append(name)
+        else:
+            groups["MainDeck"].append(name)
+
+    lines = []
+    for label, names in groups.items():
+        if not names:
+            continue
+        lines.append(f"{label}:")
+        counts = Counter(names)
+        for name, count in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"{count} {name}")
+        lines.append("")
+
+    chunks = []
+    current = ""
+    for line in lines:
+        addition = line + "\n"
+        if len(current) + len(addition) > 1900:
+            chunks.append(current.strip())
+            current = addition
+        else:
+            current += addition
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
+
+
+# ---------------------------------------------------------------------------
 # Converters
 # ---------------------------------------------------------------------------
 
@@ -617,12 +685,17 @@ class Riftbound(commands.Cog):
         other_images = [build_pack_image(pack) for pack in packs]
         images = await asyncio.gather(precon_image, *other_images)
 
-        card_codes = []
-        for pack in (packs + [precon_pack]):
-            for card in pack:
-                card_codes.append(clean_card_code(card["riftbound_id"]).upper() + "-1")
+        all_sealed_cards = [card for pack in (packs + [precon_pack]) for card in pack]
+
+        card_codes = [clean_card_code(c["riftbound_id"]).upper() + "-1" for c in all_sealed_cards]
         export_code = " ".join(card_codes)
-        await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
+
+        await ctx.send(f"{ctx.author.mention} Here's your sealed pool!", files=list(images))
+
+        for chunk in _format_sealed_pool(all_sealed_cards):
+            await ctx.send(chunk)
+
+        await ctx.send(f"Code: `{export_code}`")
 
     @riftbound.command(name="draft", description="Start a draft game", with_app_command=False)
     async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[DeckTypeConverter] = None, *users: discord.Member):

@@ -11,7 +11,7 @@ load_dotenv()
 
 intents = discord.Intents.all()
 
-bot = commands.Bot(command_prefix="#", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 token = os.getenv("TOKEN")
 
 GUILD_ID = 938505162593542155
