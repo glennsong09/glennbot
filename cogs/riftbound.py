@@ -6,7 +6,7 @@ import io
 import hashlib
 import time
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from discord.ext import commands
 from discord import app_commands
@@ -66,17 +66,20 @@ async def get_all_cards() -> list:
 # ---------------------------------------------------------------------------
 
 def clean_card_code(code: str) -> str:
-    """Clean a card code string."""
+    """Normalize a card code to set-number form (e.g. SFD-195-1 or unl-189-219 -> SFD-195 / unl-189)."""
     if "/" in code:
-        return code.split("/")[0].strip()
-    if code.endswith("-1"):  # SFD-123-1 -> SFD-123
-        return code[:-2].strip()
-    return code.strip()
+        code = code.split("/")[0]
+    parts = code.strip().split("-")
+    # Strip trailing numeric-only segment (copy count or set size)
+    if len(parts) >= 3 and parts[-1].isdigit():
+        parts = parts[:-1]
+    return "-".join(parts)
 
 
 def code_to_card(all_cards: list, code: str) -> dict:
     """Convert a card code to a card dictionary."""
-    return next((c for c in all_cards if clean_card_code(c["public_code"]) == clean_card_code(code)), None)
+    target = clean_card_code(code).lower()
+    return next((c for c in all_cards if clean_card_code(c["riftbound_id"]).lower() == target), None)
 
 
 def code_to_cards(all_cards: list, code: str) -> list:
@@ -100,7 +103,7 @@ def filter_by_rarity(cards: list, rarity: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Pack assembly  (type: OGN = origins, SFD = spiritforged)
+# Pack assembly  (type: OGN = origins, SFD = spiritforged, UNL = unleashed)
 # ---------------------------------------------------------------------------
 
 async def make_pack(type):
@@ -123,11 +126,16 @@ async def make_pack(type):
         if c["metadata"]["overnumbered"] == True and c["metadata"]["signature"] == False
     ]
 
-    runes = [c for c in all_cards if c["classification"]["type"] == "Rune" 
+    runes = ([c for c in set_cards if c["classification"]["type"] == "Rune"
                 and c["classification"]["rarity"] == "Common"]
-    tokens = [c for c in all_cards if (c["classification"]["supertype"] == "Token")]
-    alt_art_runes = [c for c in all_cards if ((c["classification"]["type"] == "Rune")
-                        and (c["metadata"]["alternate_art"] == True))]
+             or [c for c in all_cards if c["classification"]["type"] == "Rune"
+                and c["classification"]["rarity"] == "Common"])
+    tokens = ([c for c in set_cards if c["classification"]["supertype"] == "Token"]
+              or [c for c in all_cards if c["classification"]["supertype"] == "Token"])
+    alt_art_runes = ([c for c in set_cards if (c["classification"]["type"] == "Rune"
+                        and c["metadata"]["alternate_art"] == True)]
+                     or [c for c in all_cards if (c["classification"]["type"] == "Rune"
+                        and c["metadata"]["alternate_art"] == True)])
 
     cards = []
 
@@ -148,12 +156,12 @@ async def make_pack(type):
         curr_card = random.choice(uncommons)
     else:
         curr_card = random.choice(rares)
-    print(curr_card)
+    #(curr_card)
     cards.append(curr_card)
     
     # 12th card is always rare
     curr_card = random.choice(rares)
-    print(curr_card)
+    #print(curr_card)
     cards.append(curr_card)
 
     # 13th card is always rare or better foil
@@ -169,7 +177,7 @@ async def make_pack(type):
         curr_card = random.choice(overnumbered)
     else:
         curr_card = random.choice(signatures)
-    print(curr_card)
+    #print(curr_card)
     cards.append(curr_card)
 
     # 14th card is always token or rune
@@ -181,7 +189,7 @@ async def make_pack(type):
         curr_card = random.choice(tokens)
     else:
         curr_card = random.choice(alt_art_runes)
-    print(curr_card)
+    #print(curr_card)
     cards.append(curr_card)
 
     print("---")
@@ -286,42 +294,68 @@ async def refresh_card_data_and_images() -> None:
 
 
 async def build_pack_image(pack: list) -> discord.File:
-    """
-    Layout (14 cards):
-      Row 1: cards 0-6   (7 commons, left-to-right)
-      Row 2: cards 7-9   (3 uncommons, columns 0-2)
-             card 10     (foil, column 3)
-             cards 11-12 (2 rares, columns 4-5)
-             card 13     (token/rune, column 6)
-    """
+    """Build a compact grid image for any number of cards (7 per row)."""
     urls = [c["media"]["image_url"] for c in pack]
 
     async with aiohttp.ClientSession() as session:
         fetched = await asyncio.gather(*[fetch_image(session, u) for u in urls])
 
     images = list(fetched)
+    n = len(images)
+    cols = min(n, 7)
+    rows = (n + 6) // 7
 
-    canvas_w = CARD_W * 7
-    canvas_h = CARD_H * 2
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 255))
-
-    for i, img in enumerate(images[:7]):
-        canvas.paste(img, (i * CARD_W, 0))
-
-    for i, img in enumerate(images[7:10]):
-        canvas.paste(img, (i * CARD_W, CARD_H))
-
-    canvas.paste(images[10], (3 * CARD_W, CARD_H))
-
-    for i, img in enumerate(images[11:13]):
-        canvas.paste(img, ((4 + i) * CARD_W, CARD_H))
-
-    canvas.paste(images[13], (6 * CARD_W, CARD_H))
+    canvas = Image.new("RGBA", (CARD_W * cols, CARD_H * rows), (0, 0, 0, 0))
+    for i, img in enumerate(images):
+        canvas.paste(img, ((i % 7) * CARD_W, (i // 7) * CARD_H))
 
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")
     buf.seek(0)
     return discord.File(buf, filename="pack.png")
+
+
+async def build_draft_pack_image(pack: list) -> discord.File:
+    """Like build_pack_image but draws a numbered label below each card for draft pick selection."""
+    urls = [c["media"]["image_url"] for c in pack]
+
+    async with aiohttp.ClientSession() as session:
+        fetched = await asyncio.gather(*[fetch_image(session, u) for u in urls])
+
+    images = list(fetched)
+    n = len(images)
+    cols = min(n, 7)
+    rows = (n + 6) // 7
+    label_h = int(CARD_H * 0.14)
+    cell_h = CARD_H + label_h
+
+    canvas = Image.new("RGBA", (CARD_W * cols, cell_h * rows), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    try:
+        font = ImageFont.truetype("arial.ttf", size=int(label_h * 0.65))
+    except Exception:
+        font = ImageFont.load_default()
+
+    for i, img in enumerate(images):
+        col = i % 7
+        row = i // 7
+        x = col * CARD_W
+        y = row * cell_h
+        canvas.paste(img, (x, y))
+
+        label = str(i + 1)
+        lx, ly = x, y + CARD_H
+        draw.rectangle([lx, ly, lx + CARD_W, ly + label_h], fill=(20, 20, 20, 230))
+        bbox = draw.textbbox((0, 0), label, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        draw.text((lx + (CARD_W - text_w) // 2, ly + (label_h - text_h) // 2), label, fill=(220, 200, 140, 255), font=font)
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename="draft_pack.png")
 
 
 async def build_precon_pack_image(pack: list) -> discord.File:
@@ -361,7 +395,7 @@ async def build_precon_pack_image(pack: list) -> discord.File:
 
 class DeckTypeConverter(commands.Converter):
     async def convert(self, _ctx, argument):
-        if argument.lower() in ('origins', 'spiritforged'):
+        if argument.lower() in ('origins', 'spiritforged', 'unleashed'):
             return argument.lower()
         raise commands.BadArgument()
 
@@ -394,10 +428,12 @@ PACK_ASSET = Path(__file__).parent.parent / "assets" / "sfd_pack.jpg"
 
 
 class PackSelectView(discord.ui.View):
-    def __init__(self, barrier: DraftBarrier, user_id: int):
+    def __init__(self, barrier: DraftBarrier, user_id: int, packs: dict, choices: dict):
         super().__init__(timeout=600)
         self.barrier = barrier
         self.user_id = user_id
+        self.packs = packs      # {1: pack1, 2: pack2, 3: pack3}
+        self.choices = choices  # {user_id: pack_num}, shared across all views
 
     async def _pick(self, interaction: discord.Interaction, pack_num: int):
         if interaction.user.id != self.user_id:
@@ -405,7 +441,10 @@ class PackSelectView(discord.ui.View):
             return
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(content=f"You chose Pack {pack_num}! Waiting for other players...", view=self)
+        await interaction.response.edit_message(content=f"You chose Pack {pack_num}!", view=self)
+        pack_image = await build_draft_pack_image(self.packs[pack_num][:13])
+        await interaction.followup.send(file=pack_image)
+        self.choices[self.user_id] = pack_num
         await self.barrier.player_ready(self.user_id)
 
     @discord.ui.button(label="Pack 1", style=discord.ButtonStyle.primary)
@@ -419,6 +458,38 @@ class PackSelectView(discord.ui.View):
     @discord.ui.button(label="Pack 3", style=discord.ButtonStyle.primary)
     async def pack3(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await self._pick(interaction, 3)
+
+
+class CardPickView(discord.ui.View):
+    def __init__(self, barrier: DraftBarrier, user_id: int, cards: list, player_picks: dict):
+        super().__init__(timeout=600)
+        self.barrier = barrier
+        self.user_id = user_id
+        self.cards = cards
+        self.player_picks = player_picks  # {user_id: [card, ...]}, shared across all views
+
+        for i, card in enumerate(cards):
+            name = card.get('name', f'Card {i + 1}')
+            label = f"{i + 1} - {name}"[:80]  # Discord button label max is 80 chars
+            btn = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=i // 5)
+            btn.callback = self._make_pick_callback(i)
+            self.add_item(btn)
+
+    def _make_pick_callback(self, idx: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("This isn't your pick!", ephemeral=True)
+                return
+            for child in self.children:
+                child.disabled = True
+            card = self.cards[idx]
+            card_name = card.get('name', f'Card {idx + 1}')
+            await interaction.response.edit_message(
+                content=f"You picked **{card_name}**! Waiting for other players...", view=self
+            )
+            self.player_picks[self.user_id].append(card)
+            await self.barrier.player_ready(self.user_id)
+        return callback
 
 
 class ReadyView(discord.ui.View):
@@ -442,21 +513,44 @@ class ReadyView(discord.ui.View):
 # ---------------------------------------------------------------------------
 
 class Riftbound(commands.Cog):
-    PRECONS = [
-        # Irelia
-        "SFD-195-1 SFD-220-1 SFD-124-1 SFD-034-1 SFD-036-1 SFD-045-1 SFD-130-1 SFD-038-1 SFD-039-1 SFD-133-1 SFD-048-1 SFD-125-1 SFD-137-1 SFD-141-1 SFD-127-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1",
-        # Jax
-        "SFD-193-1 SFD-213-1 SFD-033-1 SFD-040-1 SFD-041-1 SFD-042-1 SFD-095-1 SFD-098-1 SFD-102-1 SFD-107-1 SFD-037-1 SFD-093-1 SFD-054-1 SFD-092-1 SFD-035-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
-        # Rek'Sai
-        "SFD-187-1 SFD-217-1 SFD-003-1 SFD-004-1 SFD-018-1 SFD-151-1 SFD-159-1 SFD-006-1 SFD-010-1 SFD-015-1 SFD-156-1 SFD-157-1 SFD-161-1 SFD-164-1 SFD-170-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
-        # Lucian
-        "SFD-183-1 SFD-218-1 SFD-009-1 SFD-097-1 SFD-108-1 SFD-001-1 SFD-007-1 SFD-011-1 SFD-016-1 SFD-095-1 SFD-099-1 SFD-096-1 SFD-107-1 SFD-113-1 SFD-002-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
-        # Renata
-        "SFD-201-1 SFD-214-1 SFD-063-1 SFD-064-1 SFD-069-1 SFD-155-1 SFD-162-1 SFD-070-1 SFD-074-1 SFD-154-1 SFD-072-1 SFD-171-1 SFD-158-1 SFD-165-1 SFD-152-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
-        # Ezreal
-        "SFD-199-1 SFD-215-1 SFD-122-1 SFD-124-1 SFD-066-1 SFD-069-1 SFD-129-1 SFD-138-1 SFD-067-1 SFD-070-1 SFD-078-1 SFD-126-1 SFD-077-1 SFD-082-1 SFD-132-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1",
-    ]
-    YONE = "SFD-116-1"
+    # Each set entry has a list of precon deck codes and the companion card appended to each.
+    # To add a new set: add a new key matching its set_id, fill in precons and companion.
+    PRECONS = {
+        'SFD': {
+            'companion': "SFD-116-1",  # Yone
+            'decks': [
+                # Irelia
+                "SFD-195-1 SFD-220-1 SFD-124-1 SFD-034-1 SFD-036-1 SFD-045-1 SFD-130-1 SFD-038-1 SFD-039-1 SFD-133-1 SFD-048-1 SFD-125-1 SFD-137-1 SFD-141-1 SFD-127-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1",
+                # Jax
+                "SFD-193-1 SFD-213-1 SFD-033-1 SFD-040-1 SFD-041-1 SFD-042-1 SFD-095-1 SFD-098-1 SFD-102-1 SFD-107-1 SFD-037-1 SFD-093-1 SFD-054-1 SFD-092-1 SFD-035-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
+                # Rek'Sai
+                "SFD-187-1 SFD-217-1 SFD-003-1 SFD-004-1 SFD-018-1 SFD-151-1 SFD-159-1 SFD-006-1 SFD-010-1 SFD-015-1 SFD-156-1 SFD-157-1 SFD-161-1 SFD-164-1 SFD-170-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-214-1 OGN-214-114-1 OGN-214-1 OGN-214- OGN-214-1 OGN-21",
+                # Lucian
+                "SFD-183-1 SFD-218-1 SFD-009-1 SFD-097-1 SFD-108-1 SFD-001-1 SFD-007-1 SFD-011-1 SFD-016-1 SFD-095-1 SFD-099-1 SFD-096-1 SFD-107-1 SFD-113-1 SFD-002-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
+                # Renata
+                "SFD-201-1 SFD-214-1 SFD-063-1 SFD-064-1 SFD-069-1 SFD-155-1 SFD-162-1 SFD-070-1 SFD-074-1 SFD-154-1 SFD-072-1 SFD-171-1 SFD-158-1 SFD-165-1 SFD-152-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
+                # Ezreal
+                "SFD-199-1 SFD-215-1 SFD-122-1 SFD-124-1 SFD-066-1 SFD-069-1 SFD-129-1 SFD-138-1 SFD-067-1 SFD-070-1 SFD-078-1 SFD-126-1 SFD-077-1 SFD-082-1 SFD-132-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1",
+            ],
+        },
+        'UNL': {
+            'companion': "UNL-169-1",  # Ashe
+            'decks': [
+                # Khazix
+                "UNL-201-1 UNL-143-1 UNL-136-1 UNL-092-1 UNL-095-1 UNL-124-1 UNL-127-1 UNL-101-1 UNL-102-1 UNL-096-1 UNL-135-1 UNL-097-1 UNL-129-1 UNL-126-1 UNL-124-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
+                # Yi
+                "UNL-191-1 UNL-113-1 UNL-031-1 UNL-039-1 UNL-094-1 UNL-107-1 UNL-040-1 UNL-038-1 UNL-043-1 UNL-047-1 UNL-108-1 UNL-034-1 UNL-091-1 UNL-100-1 UNL-213-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
+                # Jhin
+                "UNL-181-1 UNL-022-1 UNL-061-1 UNL-074-1 UNL-065-1 UNL-013-1 UNL-009-1 UNL-004-1 UNL-073-1 UNL-062-1 UNL-017-1 UNL-064-1 UNL-069-1 UNL-005-1 UNL-211-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1",
+                # Diana
+                "UNL-197-1 UNL-079-1 UNL-134-1 UNL-131-1 UNL-065-1 UNL-121-1 UNL-071-1 UNL-063-1 UNL-125-1 UNL-072-1 UNL-128-1 UNL-122-1 UNL-130-1 UNL-066-1 UNL-205-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-089-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1",
+                # Vi
+                "UNL-187-1 UNL-176-1 UNL-153-1 UNL-002-1 UNL-007-1 UNL-152-1 UNL-155-1 UNL-006-1 UNL-163-1 UNL-017-1 UNL-001-1 UNL-160-1 UNL-012-1 UNL-018-1 UNL-218-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
+                # Ivern
+                "UNL-195-1 UNL-051-1 UNL-046-1 UNL-032-1 UNL-036-1 UNL-159-1 UNL-154-1 UNL-155-1 UNL-156-1 UNL-033-1 UNL-166-1 UNL-044-1 UNL-160-1 UNL-167-1 UNL-217-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
+            ],
+        },
+    }
 
     def __init__(self, bot):
         self.bot = bot
@@ -485,34 +579,37 @@ class Riftbound(commands.Cog):
         await ctx.send_help(ctx.command)
 
     @riftbound.command(name="pack", description="Open a Riftbound pack")
-    @app_commands.describe(deck_type="Pack type: origins or spiritforged (default)")
+    @app_commands.describe(deck_type="Pack type: origins, spiritforged, or unleashed (default)")
     @app_commands.choices(deck_type=[
         app_commands.Choice(name="Origins", value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
+        app_commands.Choice(name="Unleashed", value="unleashed"),
     ])
     async def riftbound_open(self, ctx: commands.Context, deck_type: Optional[str] = None):
         """Open a single Riftbound pack. Use !riftbound open or /riftbound open."""
         await ctx.defer()
         await self._register_profile(ctx.author)
-        set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+        set_id = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}.get(deck_type, 'UNL')
         pack = await make_pack(set_id)
         pack_image = await build_pack_image(pack)
         await ctx.send(file=pack_image)
 
     @riftbound.command(name="sealed", description="Generate a sealed pool")
-    @app_commands.describe(deck_type="Pack type: origins or spiritforged (default)")
+    @app_commands.describe(deck_type="Pack type: origins, spiritforged, or unleashed (default)")
     @app_commands.choices(deck_type=[
         app_commands.Choice(name="Origins", value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
+        app_commands.Choice(name="Unleashed", value="unleashed"),
     ])
     async def riftbound_sealed(self, ctx: commands.Context, deck_type: Optional[str] = None):
         """Generate a sealed pool. Use !riftbound sealed or /riftbound sealed."""
         await ctx.defer()
         await self._register_profile(ctx.author)
-        set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+        set_id = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}.get(deck_type, 'UNL')
         packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
 
-        precon_code = random.choice(self.PRECONS) + " " + self.YONE
+        precon_set = self.PRECONS.get(set_id, self.PRECONS['SFD'])
+        precon_code = random.choice(precon_set['decks']) + " " + precon_set['companion']
         all_cards = await get_all_cards()
         precon_pack = code_to_cards(all_cards, precon_code)
 
@@ -523,7 +620,7 @@ class Riftbound(commands.Cog):
         card_codes = []
         for pack in (packs + [precon_pack]):
             for card in pack:
-                card_codes.append(clean_card_code(card["public_code"]))
+                card_codes.append(clean_card_code(card["riftbound_id"]).upper() + "-1")
         export_code = " ".join(card_codes)
         await ctx.send(f"{ctx.author.mention} Here's your sealed pool!\nCode: {export_code}", files=list(images))
 
@@ -531,7 +628,7 @@ class Riftbound(commands.Cog):
     async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[DeckTypeConverter] = None, *users: discord.Member):
         """Start a draft. Use !riftbound draft [origins|spiritforged] @player1 @player2 ..."""
         await self._register_profile(ctx.author)
-        set_id = 'OGN' if deck_type == 'origins' else 'SFD'
+        set_id = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}.get(deck_type, 'UNL')
         players = list(users)
 
         # Ensure there are players mentioned
@@ -559,23 +656,38 @@ class Riftbound(commands.Cog):
         # Generate 3 packs per player
         player_packs = {}
         for player in players:
-            player_packs[player.id] = await asyncio.gather(*[make_pack(set_id) for _ in range(3)])
+            packs = await asyncio.gather(*[make_pack(set_id) for _ in range(3)])
+            player_packs[player.id] = {i + 1: pack for i, pack in enumerate(packs)}
 
-        # Build all pack images
-        '''player_images = {}
-        for player in players:
-            player_images[player.id] = await asyncio.gather(*[build_pack_image(p) for p in player_packs[player.id]])'''
 
-        # DM each player their 3 packs, then a pack select view
+        # Round 1: players choose which pack to open
+        pack_choices = {}
         barrier = DraftBarrier([p.id for p in players])
         for player in players:
             pack_files = [discord.File(PACK_ASSET, filename=f"pack{i+1}.jpg") for i in range(3)]
-            view = PackSelectView(barrier, player.id)
+            view = PackSelectView(barrier, player.id, player_packs[player.id], pack_choices)
             await player.send("Which pack do you want to open first?", files=pack_files, view=view)
 
-        await ctx.send("Packs sent! Waiting for all players to ready up...")
+        await ctx.send("Packs sent! Waiting for all players to choose a pack...")
         await barrier.wait()
-        await ctx.send("All players are ready!")
+
+        await ctx.send("All players chose a pack! Waiting for card picks...")
+
+        # Round 1: players pick a card from their chosen pack
+        player_picks = {p.id: [] for p in players}
+        barrier.reset()
+        for player in players:
+            pack = list(player_packs[player.id][pack_choices[player.id]])[:13]
+            view = CardPickView(barrier, player.id, pack, player_picks)
+            await player.send("Pick a card! The numbers match card positions in the image above.", view=view)
+        await barrier.wait()
+        await ctx.send("All players have made their picks!")
+
+        
+
+        
+
+
 
     async def _register_profile(self, user):
         if db.record("SELECT * FROM profiles WHERE user_id = ?", user.id) == None:

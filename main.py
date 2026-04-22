@@ -1,5 +1,6 @@
 import discord
 import os
+import sys
 from discord.ext import commands
 from discord import Intents
 from database import db
@@ -10,7 +11,7 @@ load_dotenv()
 
 intents = discord.Intents.all()
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="#", intents=intents)
 token = os.getenv("TOKEN")
 
 GUILD_ID = 938505162593542155
@@ -30,4 +31,7 @@ async def setup_hook():
 
 
 bot.setup_hook = setup_hook
-bot.run(token)
+try:
+    bot.run(token)
+except Exception:
+    sys.exit(1)
