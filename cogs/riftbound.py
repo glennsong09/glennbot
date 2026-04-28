@@ -602,7 +602,7 @@ class Riftbound(commands.Cog):
             ],
         },
         'UNL': {
-            'companion': "UNL-169-1",  # Ashe
+            'companion': None,
             'decks': [
                 # Khazix
                 "UNL-201-1 UNL-143-1 UNL-136-1 UNL-092-1 UNL-095-1 UNL-124-1 UNL-127-1 UNL-101-1 UNL-102-1 UNL-096-1 UNL-135-1 UNL-097-1 UNL-129-1 UNL-126-1 UNL-124-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-166-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
@@ -677,7 +677,10 @@ class Riftbound(commands.Cog):
         packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
 
         precon_set = self.PRECONS.get(set_id, self.PRECONS['SFD'])
-        precon_code = random.choice(precon_set['decks']) + " " + precon_set['companion']
+        companion = precon_set.get('companion')
+        precon_code = random.choice(precon_set['decks'])
+        if companion:
+            precon_code += " " + companion
         all_cards = await get_all_cards()
         precon_pack = code_to_cards(all_cards, precon_code)
 
