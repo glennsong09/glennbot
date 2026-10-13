@@ -1,6 +1,7 @@
 import discord
 import random
 import re
+import functools
 import aiohttp
 import asyncio
 import io
@@ -17,184 +18,207 @@ from database import db
 
 
 # ---------------------------------------------------------------------------
-# Cache configuration
+# Constants
 # ---------------------------------------------------------------------------
 
-RESIZE_FACTOR = 0.5  # Scale down for faster generation (0.5 = half size)
-CACHE_DIR = Path(__file__).parent.parent / "cache" / "card_images"
-REFRESH_INTERVAL = 6 * 3600  # 6 hours
+RESIZE_FACTOR    = 0.5
+CACHE_DIR        = Path(__file__).parent.parent / "cache" / "card_images"
+REFRESH_INTERVAL = 6 * 3600
 
-_card_cache: Optional[list] = None
-_card_cache_time: float = 0
+SET_ID_MAP = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}
 
+_BASE_CARD_W, _BASE_CARD_H = 744, 1039
+CARD_W = int(_BASE_CARD_W * RESIZE_FACTOR)
+CARD_H = int(_BASE_CARD_H * RESIZE_FACTOR)
+
+# Pack slot probabilities (pre-computed thresholds)
+_FOIL_T    = (73/144, (73+44)/144)
+_PREMIUM_T = (91/144, (91+35)/144, (91+35+13)/144, (91+35+13+4)/144)
+_RUNE_T    = (61/96, (61+32)/96)
+
+_RE_OVERNUMBERED = re.compile(r"\s*\(Overnumbered\)", re.IGNORECASE)
+_RE_ALT_ART      = re.compile(r"\s*\(Alternate Art\)", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
 
 async def _fetch_all_cards_from_api() -> list:
-    """Fetch all cards from the API (no cache)."""
-    url = "https://api.riftcodex.com/cards"
-    params = {"size": 50, "page": 1}
-    all_cards = []
+    url     = "https://api.riftcodex.com/cards"
+    timeout = aiohttp.ClientTimeout(total=30)
 
-    async with aiohttp.ClientSession() as session:
-        while True:
-            async with session.get(url, params=params) as resp:
-                data = await resp.json()
+    for attempt in range(3):
+        try:
+            params, cards = {"size": 50, "page": 1}, []
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                while True:
+                    async with session.get(url, params=params) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+                    cards.extend(data["items"])
+                    if data["page"] >= data["pages"]:
+                        break
+                    params["page"] += 1
+            return cards
+        except Exception as e:
+            print(f"[riftbound] API fetch attempt {attempt + 1}/3 failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
 
-            all_cards.extend(data["items"])
+    raise RuntimeError("[riftbound] Failed to fetch cards from API after 3 attempts")
 
-            if data["page"] >= data["pages"]:
-                break
-            params["page"] += 1
 
-    return all_cards
+# ---------------------------------------------------------------------------
+# Card cache (encapsulates data, staleness, lock, and per-set pool cache)
+# ---------------------------------------------------------------------------
+
+class _CardCache:
+    def __init__(self):
+        self._data:  Optional[list]  = None
+        self._time:  float           = 0
+        self._lock:  asyncio.Lock    = asyncio.Lock()
+        self._pools: dict[str, dict] = {}  # set_id -> precomputed pool lists
+
+    async def get(self) -> list:
+        now = time.time()
+        if self._data is not None and now - self._time < REFRESH_INTERVAL:
+            return self._data
+        async with self._lock:
+            now = time.time()
+            if self._data is not None and now - self._time < REFRESH_INTERVAL:
+                return self._data
+            self._data  = await _fetch_all_cards_from_api()
+            self._time  = now
+            self._pools = {}
+        return self._data
+
+    async def get_pools(self, set_id: str) -> dict:
+        data = await self.get()
+        if set_id not in self._pools:
+            self._pools[set_id] = _compute_pools(data, set_id)
+        return self._pools[set_id]
+
+    async def refresh(self) -> list:
+        async with self._lock:
+            self._data  = await _fetch_all_cards_from_api()
+            self._time  = time.time()
+            self._pools = {}
+        return self._data
+
+
+_card_cache = _CardCache()
 
 
 async def get_all_cards() -> list:
-    """Fetch all cards from the API. Results are cached for 6 hours."""
-    global _card_cache, _card_cache_time
-    now = time.time()
-    if _card_cache is not None and (now - _card_cache_time) < REFRESH_INTERVAL:
-        return _card_cache
-    _card_cache = await _fetch_all_cards_from_api()
-    _card_cache_time = now
-    return _card_cache
+    return await _card_cache.get()
 
 
 # ---------------------------------------------------------------------------
-# Card lookup utilities
+# Card lookup
 # ---------------------------------------------------------------------------
 
 def clean_card_code(code: str) -> str:
-    """Normalize a card code to set-number form (e.g. SFD-195-1 or unl-189-219 -> SFD-195 / unl-189)."""
     if "/" in code:
         code = code.split("/")[0]
     parts = code.strip().split("-")
-    # Strip trailing numeric-only segment (copy count or set size)
     if len(parts) >= 3 and parts[-1].isdigit():
         parts = parts[:-1]
     return "-".join(parts)
 
 
-def code_to_card(all_cards: list, code: str) -> dict:
-    """Convert a card code to a card dictionary."""
-    target = clean_card_code(code).lower()
-    return next((c for c in all_cards if clean_card_code(c["riftbound_id"]).lower() == target), None)
-
-
 def code_to_cards(all_cards: list, code: str) -> list:
-    """Convert a card code string to a list of card dictionaries."""
-    card_codes = code.split(" ")
-    cards = [code_to_card(all_cards, c) for c in card_codes]
-    missing = [card_codes[i] for i, c in enumerate(cards) if c is None]
+    lookup = {clean_card_code(c["riftbound_id"]).lower(): c for c in all_cards}
+    result, missing = [], []
+    for raw in code.split():
+        card = lookup.get(clean_card_code(raw).lower())
+        if card:
+            result.append(card)
+        else:
+            missing.append(raw)
     if missing:
-        print(f"[code_to_cards] Could not find cards for codes: {missing}")
-    return [c for c in cards if c is not None]
+        print(f"[code_to_cards] Missing: {missing}")
+    return result
 
 
-def filter_by_set(cards: list, set_id: str) -> list:
-    """Filter cards by set ID."""
+def _by_set(cards: list, set_id: str) -> list:
     return [c for c in cards if c["set"]["set_id"] == set_id]
 
 
-def filter_by_rarity(cards: list, rarity: str) -> list:
-    """Filter cards by rarity."""
+def _by_rarity(cards: list, rarity: str) -> list:
     return [c for c in cards if c["classification"]["rarity"] == rarity]
 
 
 # ---------------------------------------------------------------------------
-# Pack assembly  (type: OGN = origins, SFD = spiritforged, UNL = unleashed)
+# Pack assembly
 # ---------------------------------------------------------------------------
 
-async def make_pack(type):
-    all_cards = await get_all_cards()
-    set_cards = filter_by_set(all_cards, type)
+def _compute_pools(all_cards: list, set_id: str) -> dict:
+    """Build and validate all card pools for a set. Called once per set per cache refresh."""
+    set_cards = _by_set(all_cards, set_id)
+    showcases = _by_rarity(set_cards, "Showcase")
 
-    commons = filter_by_rarity(set_cards, "Common")
-    commons = [c for c in commons if not ((c["classification"]["supertype"] == "Token")
-                                           or (c["classification"]["type"] == "Rune"))]
-    uncommons = filter_by_rarity(set_cards, "Uncommon")
-    rares = filter_by_rarity(set_cards, "Rare")
-    epics = filter_by_rarity(set_cards, "Epic")
-    showcases = filter_by_rarity(set_cards, "Showcase")
+    commons    = [c for c in set_cards
+                  if c["classification"]["rarity"] == "Common"
+                  and c["classification"]["supertype"] != "Token"
+                  and c["classification"]["type"] != "Rune"]
+    uncommons    = _by_rarity(set_cards, "Uncommon")
+    rares        = _by_rarity(set_cards, "Rare")
+    epics        = _by_rarity(set_cards, "Epic")
+    signatures   = [c for c in showcases if c["metadata"]["signature"]]
+    alt_arts     = [c for c in showcases if c["metadata"]["alternate_art"] and c["classification"]["type"] != "Rune"]
+    overnumbered = [c for c in showcases if c["metadata"]["overnumbered"] and not c["metadata"]["signature"]]
 
-    signatures = [c for c in showcases if c["metadata"]["signature"] == True]
-    alt_arts = [c for c in showcases if ((c["metadata"]["alternate_art"] == True) 
-                    and (c["classification"]["type"] != "Rune"))]
-    overnumbered = [
-        c for c in showcases
-        if c["metadata"]["overnumbered"] == True and c["metadata"]["signature"] == False
-    ]
+    def _from_set_or_all(pred):
+        result = [c for c in set_cards if pred(c)]
+        return result or [c for c in all_cards if pred(c)]
 
-    runes = ([c for c in set_cards if c["classification"]["type"] == "Rune"
-                and c["classification"]["rarity"] == "Common"]
-             or [c for c in all_cards if c["classification"]["type"] == "Rune"
-                and c["classification"]["rarity"] == "Common"])
-    tokens = ([c for c in set_cards if c["classification"]["supertype"] == "Token"]
-              or [c for c in all_cards if c["classification"]["supertype"] == "Token"])
-    alt_art_runes = ([c for c in set_cards if (c["classification"]["type"] == "Rune"
-                        and c["metadata"]["alternate_art"] == True)]
-                     or [c for c in all_cards if (c["classification"]["type"] == "Rune"
-                        and c["metadata"]["alternate_art"] == True)])
+    runes         = _from_set_or_all(lambda c: c["classification"]["type"] == "Rune" and c["classification"]["rarity"] == "Common")
+    tokens        = _from_set_or_all(lambda c: c["classification"]["supertype"] == "Token")
+    alt_art_runes = _from_set_or_all(lambda c: c["classification"]["type"] == "Rune" and c["metadata"]["alternate_art"])
 
-    cards = []
+    for pool, name in [(commons, "commons"), (uncommons, "uncommons"), (rares, "rares"),
+                       (runes, "runes"), (tokens, "tokens")]:
+        if not pool:
+            raise ValueError(f"Empty card pool '{name}' for set '{set_id}'")
 
-    # 7 commons
-    while len(cards) < 7:
-        cards.append(random.choice(commons))
+    return {
+        'commons':      commons,
+        'uncommons':    uncommons,
+        'rares':        rares,
+        'epics':        epics        or rares,
+        'signatures':   signatures   or rares,
+        'alt_arts':     alt_arts     or rares,
+        'overnumbered': overnumbered or rares,
+        'runes':        runes,
+        'tokens':       tokens,
+        'alt_art_runes': alt_art_runes or runes,
+    }
 
-    # 3 uncommons
-    while len(cards) < 10:
-        cards.append(random.choice(uncommons))
-    
-    # 11th card is foil slot
-    luck = random.random()
-    print("foil", luck)
-    if luck < 73 / 144:
-        curr_card = random.choice(commons)
-    elif luck < (73 + 44) / 144:
-        curr_card = random.choice(uncommons)
-    else:
-        curr_card = random.choice(rares)
-    #(curr_card)
-    cards.append(curr_card)
-    
-    # 12th card is always rare
-    curr_card = random.choice(rares)
-    #print(curr_card)
-    cards.append(curr_card)
 
-    # 13th card is always rare or better foil
-    luck = random.random()
-    print("foil", luck)
-    if luck < (91 / 144):
-        curr_card = random.choice(rares)
-    elif luck < (91 + 35) / 144:
-        curr_card = random.choice(epics)
-    elif luck < (91 + 35 + 13) / 144:
-        curr_card = random.choice(alt_arts)
-    elif luck < (91 + 35 + 13 + 4) / 144:
-        curr_card = random.choice(overnumbered)
-    else:
-        curr_card = random.choice(signatures)
-    #print(curr_card)
-    cards.append(curr_card)
+async def make_pack(set_id: str) -> list:
+    p = await _card_cache.get_pools(set_id)
 
-    # 14th card is always token or rune
-    luck = random.random()
-    print("rune/tokens", luck)
-    if luck < (61 / 96):
-        curr_card = random.choice(runes)
-    elif luck < (61 + 32) / 96:
-        curr_card = random.choice(tokens)
-    else:
-        curr_card = random.choice(alt_art_runes)
-    #print(curr_card)
-    cards.append(curr_card)
+    cards = random.choices(p['commons'], k=7) + random.choices(p['uncommons'], k=3)
 
-    print("---")
+    r = random.random()
+    if r < _FOIL_T[0]:   cards.append(random.choice(p['commons']))
+    elif r < _FOIL_T[1]: cards.append(random.choice(p['uncommons']))
+    else:                 cards.append(random.choice(p['rares']))
+
+    cards.append(random.choice(p['rares']))
+
+    r = random.random()
+    if r < _PREMIUM_T[0]:   cards.append(random.choice(p['rares']))
+    elif r < _PREMIUM_T[1]: cards.append(random.choice(p['epics']))
+    elif r < _PREMIUM_T[2]: cards.append(random.choice(p['alt_arts']))
+    elif r < _PREMIUM_T[3]: cards.append(random.choice(p['overnumbered']))
+    else:                    cards.append(random.choice(p['signatures']))
+
+    r = random.random()
+    if r < _RUNE_T[0]:   cards.append(random.choice(p['runes']))
+    elif r < _RUNE_T[1]: cards.append(random.choice(p['tokens']))
+    else:                 cards.append(random.choice(p['alt_art_runes']))
+
     return cards
 
 
@@ -202,19 +226,11 @@ async def make_pack(type):
 # Image building
 # ---------------------------------------------------------------------------
 
-_BASE_CARD_W, _BASE_CARD_H = 744, 1039
-CARD_W = int(_BASE_CARD_W * RESIZE_FACTOR)
-CARD_H = int(_BASE_CARD_H * RESIZE_FACTOR)
-
-
 def _url_to_cache_path(url: str) -> Path:
-    """Get the local cache file path for an image URL."""
-    key = hashlib.sha256(url.encode()).hexdigest()[:32]
-    return CACHE_DIR / f"{key}.png"
+    return CACHE_DIR / f"{hashlib.sha256(url.encode()).hexdigest()[:32]}.png"
 
 
 def _process_image(data: bytes) -> Image.Image:
-    """Load raw image bytes and process to standard card format."""
     img = Image.open(io.BytesIO(data)).convert("RGBA")
     if img.width > img.height:
         img = img.rotate(90, expand=True)
@@ -223,172 +239,124 @@ def _process_image(data: bytes) -> Image.Image:
     return img
 
 
-def _load_from_cache(url: str) -> Optional[Image.Image]:
-    """Load a processed image from local cache if it exists."""
-    path = _url_to_cache_path(url)
-    if path.exists():
-        try:
-            return Image.open(path).convert("RGBA")
-        except Exception:
-            return None
-    return None
+def _blank_card() -> Image.Image:
+    return Image.new("RGBA", (CARD_W, CARD_H), (40, 40, 40, 255))
 
 
 async def fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image:
-    """Fetch card image, using local cache when available."""
-    cached = _load_from_cache(url)
-    if cached is not None:
-        return cached
-
+    loop = asyncio.get_running_loop()
+    path = _url_to_cache_path(url)
+    if path.exists():
+        try:
+            return await loop.run_in_executor(None, lambda: Image.open(path).convert("RGBA"))
+        except Exception:
+            path.unlink(missing_ok=True)
     async with session.get(url) as resp:
         data = await resp.read()
-    img = _process_image(data)
-
-    # Save to cache for next time
+    img = await loop.run_in_executor(None, _process_image, data)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _url_to_cache_path(url)
-    img.save(path, format="PNG")
-
+    await loop.run_in_executor(None, functools.partial(img.save, path, format="PNG"))
     return img
 
 
-async def refresh_all_images() -> int:
-    """Fetch all card images and cache them locally. Returns count of images cached."""
-    all_cards = await _fetch_all_cards_from_api()
-    urls = list({c["media"]["image_url"] for c in all_cards if c.get("media", {}).get("image_url")})
+async def _fetch_images(urls: list) -> list:
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*[fetch_image(session, u) for u in urls], return_exceptions=True)
+    images = []
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            print(f"[riftbound] Image fetch failed (index {i}): {r}")
+            images.append(_blank_card())
+        else:
+            images.append(r)
+    return images
 
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    async def download_one(session: aiohttp.ClientSession, url: str) -> bool:
-        path = _url_to_cache_path(url)
+def _build_grid(images: list, cols: int = 7, numbered: bool = False, bg=(0, 0, 0, 0)) -> io.BytesIO:
+    n         = len(images)
+    grid_cols = min(n, cols)
+    rows      = (n + cols - 1) // cols
+    label_h   = int(CARD_H * 0.14) if numbered else 0
+    cell_h    = CARD_H + label_h
+    canvas    = Image.new("RGBA", (CARD_W * grid_cols, cell_h * rows), bg)
+
+    draw, font = None, None
+    if numbered:
+        draw = ImageDraw.Draw(canvas)
         try:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return False
-                data = await resp.read()
-            img = _process_image(data)
-            img.save(path, format="PNG")
-            return True
-        except Exception as e:
-            print(f"[riftbound] Failed to cache image {url[:60]}...: {e}")
-            return False
+            font = ImageFont.truetype("arial.ttf", size=int(label_h * 0.65))
+        except Exception:
+            font = ImageFont.load_default()
 
-    sem = asyncio.Semaphore(20)  # Limit concurrent downloads
-
-    async def limited_download(session: aiohttp.ClientSession, url: str) -> bool:
-        async with sem:
-            return await download_one(session, url)
-
-    async with aiohttp.ClientSession() as session:
-        results = await asyncio.gather(*[limited_download(session, u) for u in urls])
-
-    return sum(1 for r in results if r)
-
-
-async def refresh_card_data_and_images() -> None:
-    """Refresh card data and all card images. Called every 6 hours."""
-    global _card_cache, _card_cache_time
-    print("[riftbound] Refreshing card data and images...")
-    _card_cache = await _fetch_all_cards_from_api()
-    _card_cache_time = time.time()
-    count = await refresh_all_images()
-    print(f"[riftbound] Cached {count} card images")
-
-
-async def build_pack_image(pack: list) -> discord.File:
-    """Build a compact grid image for any number of cards (7 per row)."""
-    urls = [c["media"]["image_url"] for c in pack]
-
-    async with aiohttp.ClientSession() as session:
-        fetched = await asyncio.gather(*[fetch_image(session, u) for u in urls])
-
-    images = list(fetched)
-    n = len(images)
-    cols = min(n, 7)
-    rows = (n + 6) // 7
-
-    canvas = Image.new("RGBA", (CARD_W * cols, CARD_H * rows), (0, 0, 0, 0))
     for i, img in enumerate(images):
-        canvas.paste(img, ((i % 7) * CARD_W, (i // 7) * CARD_H))
+        col, row = i % cols, i // cols
+        x, y = col * CARD_W, row * cell_h
+        canvas.paste(img, (x, y))
+        if numbered:
+            lx, ly = x, y + CARD_H
+            draw.rectangle([lx, ly, lx + CARD_W, ly + label_h], fill=(20, 20, 20, 230))
+            text = str(i + 1)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((lx + (CARD_W - tw) // 2, ly + (label_h - th) // 2), text, fill=(220, 200, 140, 255), font=font)
 
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")
     buf.seek(0)
+    return buf
+
+
+async def build_pack_image(pack: list) -> discord.File:
+    loop = asyncio.get_running_loop()
+    imgs = await _fetch_images([c["media"]["image_url"] for c in pack])
+    buf  = await loop.run_in_executor(None, _build_grid, imgs)
     return discord.File(buf, filename="pack.png")
 
 
 async def build_draft_pack_image(pack: list) -> discord.File:
-    """Like build_pack_image but draws a numbered label below each card for draft pick selection."""
-    urls = [c["media"]["image_url"] for c in pack]
-
-    async with aiohttp.ClientSession() as session:
-        fetched = await asyncio.gather(*[fetch_image(session, u) for u in urls])
-
-    images = list(fetched)
-    n = len(images)
-    cols = min(n, 7)
-    rows = (n + 6) // 7
-    label_h = int(CARD_H * 0.14)
-    cell_h = CARD_H + label_h
-
-    canvas = Image.new("RGBA", (CARD_W * cols, cell_h * rows), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-
-    try:
-        font = ImageFont.truetype("arial.ttf", size=int(label_h * 0.65))
-    except Exception:
-        font = ImageFont.load_default()
-
-    for i, img in enumerate(images):
-        col = i % 7
-        row = i // 7
-        x = col * CARD_W
-        y = row * cell_h
-        canvas.paste(img, (x, y))
-
-        label = str(i + 1)
-        lx, ly = x, y + CARD_H
-        draw.rectangle([lx, ly, lx + CARD_W, ly + label_h], fill=(20, 20, 20, 230))
-        bbox = draw.textbbox((0, 0), label, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        draw.text((lx + (CARD_W - text_w) // 2, ly + (label_h - text_h) // 2), label, fill=(220, 200, 140, 255), font=font)
-
-    buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
-    buf.seek(0)
+    loop = asyncio.get_running_loop()
+    imgs = await _fetch_images([c["media"]["image_url"] for c in pack])
+    buf  = await loop.run_in_executor(None, functools.partial(_build_grid, imgs, numbered=True))
     return discord.File(buf, filename="draft_pack.png")
 
 
 async def build_precon_pack_image(pack: list) -> discord.File:
-    """
-    Layout (28 cards):
-      Row 1: cards 0-6   (7 cards)
-      Row 2: cards 7-13  (7 cards)
-      Row 3: cards 14-20 (7 cards)
-      Row 4: cards 21-27 (7 cards)
-    """
-    urls = [c["media"]["image_url"] for c in pack]
+    loop = asyncio.get_running_loop()
+    imgs = await _fetch_images([c["media"]["image_url"] for c in pack[:28]])
+    buf  = await loop.run_in_executor(None, functools.partial(_build_grid, imgs, bg=(0, 0, 0, 255)))
+    return discord.File(buf, filename="precon.png")
+
+
+async def refresh_all_images(cards: list) -> int:
+    urls = list({c["media"]["image_url"] for c in cards if c.get("media", {}).get("image_url")})
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    sem = asyncio.Semaphore(20)
+
+    async def download_one(session: aiohttp.ClientSession, url: str) -> bool:
+        async with sem:
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        return False
+                    data = await resp.read()
+                loop = asyncio.get_running_loop()
+                img  = await loop.run_in_executor(None, _process_image, data)
+                await loop.run_in_executor(None, functools.partial(img.save, _url_to_cache_path(url), format="PNG"))
+                return True
+            except Exception as e:
+                print(f"[riftbound] Failed to cache {url[:60]}: {e}")
+                return False
 
     async with aiohttp.ClientSession() as session:
-        fetched = await asyncio.gather(*[fetch_image(session, u) for u in urls])
+        results = await asyncio.gather(*[download_one(session, u) for u in urls])
+    return sum(results)
 
-    images = list(fetched[:28])
 
-    canvas_w = CARD_W * 7
-    canvas_h = CARD_H * 4
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 255))
-
-    for row in range(4):
-        for col in range(7):
-            idx = row * 7 + col
-            if idx < len(images):
-                canvas.paste(images[idx], (col * CARD_W, row * CARD_H))
-
-    buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
-    buf.seek(0)
-    return discord.File(buf, filename="precon.png")
+async def refresh_card_data_and_images() -> None:
+    print("[riftbound] Refreshing card data and images...")
+    cards = await _card_cache.refresh()
+    count = await refresh_all_images(cards)
+    print(f"[riftbound] Cached {count} card images")
 
 
 # ---------------------------------------------------------------------------
@@ -396,28 +364,21 @@ async def build_precon_pack_image(pack: list) -> discord.File:
 # ---------------------------------------------------------------------------
 
 def _format_sealed_pool(cards: list) -> list[str]:
-    """Group cards by type and return a list of message-safe chunks (<= 2000 chars each)."""
     groups: dict[str, list] = {
-        "Legend": [],
-        "Champion": [],
-        "MainDeck": [],
-        "Battlefields": [],
-        "Gear": [],
-        "Runes": [],
+        "Legend": [], "Champion": [], "MainDeck": [],
+        "Battlefields": [], "Gear": [], "Runes": [],
     }
 
     for card in cards:
         classification = card.get("classification") or {}
         card_type = classification.get("type") or ""
         supertype = classification.get("supertype") or ""
-        raw_name = card.get("name") or "Unknown"
+        raw_name  = card.get("name") or "Unknown"
 
         if supertype == "Token" or "// Buff" in raw_name:
             continue
 
-        name = raw_name.replace(" - ", ", ")
-        name = re.sub(r"\s*\(Overnumbered\)", "", name, flags=re.IGNORECASE)
-        name = re.sub(r"\s*\(Alternate Art\)", "", name, flags=re.IGNORECASE)
+        name = _RE_OVERNUMBERED.sub("", _RE_ALT_ART.sub("", raw_name.replace(" - ", ", ")))
 
         if card_type == "Rune":
             groups["Runes"].append(name)
@@ -437,13 +398,11 @@ def _format_sealed_pool(cards: list) -> list[str]:
         if not names:
             continue
         lines.append(f"{label}:")
-        counts = Counter(names)
-        for name, count in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+        for name, count in sorted(Counter(names).items(), key=lambda x: (-x[1], x[0])):
             lines.append(f"{count} {name}")
         lines.append("")
 
-    chunks = []
-    current = ""
+    chunks, current = [], ""
     for line in lines:
         addition = line + "\n"
         if len(current) + len(addition) > 1900:
@@ -453,35 +412,25 @@ def _format_sealed_pool(cards: list) -> list[str]:
             current += addition
     if current.strip():
         chunks.append(current.strip())
-
     return chunks
-
-
-# ---------------------------------------------------------------------------
-# Converters
-# ---------------------------------------------------------------------------
-
-class DeckTypeConverter(commands.Converter):
-    async def convert(self, _ctx, argument):
-        if argument.lower() in ('origins', 'spiritforged', 'unleashed'):
-            return argument.lower()
-        raise commands.BadArgument()
 
 
 # ---------------------------------------------------------------------------
 # Draft helpers
 # ---------------------------------------------------------------------------
 
+class DeckTypeConverter(commands.Converter):
+    async def convert(self, _ctx, argument):
+        if argument.lower() in SET_ID_MAP:
+            return argument.lower()
+        raise commands.BadArgument()
+
+
 class DraftBarrier:
-    """Blocks until all expected players have signalled ready."""
     def __init__(self, player_ids: list):
-        self._ids = set(player_ids)
+        self._ids   = set(player_ids)
         self._ready: set = set()
         self._event = asyncio.Event()
-
-    def reset(self):
-        self._ready.clear()
-        self._event.clear()
 
     async def player_ready(self, user_id: int):
         self._ready.add(user_id)
@@ -492,87 +441,62 @@ class DraftBarrier:
         await self._event.wait()
 
 
-PACK_ASSET = Path(__file__).parent.parent / "assets" / "sfd_pack.jpg"
+async def _wait_for_barrier(barrier: DraftBarrier, cancel: asyncio.Event) -> bool:
+    """Wait for barrier or cancellation. Returns True if the draft was cancelled."""
+    barrier_task = asyncio.create_task(barrier.wait())
+    cancel_task  = asyncio.create_task(cancel.wait())
+    _, pending = await asyncio.wait([barrier_task, cancel_task], return_when=asyncio.FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    return cancel.is_set()
 
 
-class PackSelectView(discord.ui.View):
-    def __init__(self, barrier: DraftBarrier, user_id: int, packs: dict, choices: dict):
-        super().__init__(timeout=600)
-        self.barrier = barrier
-        self.user_id = user_id
-        self.packs = packs      # {1: pack1, 2: pack2, 3: pack3}
-        self.choices = choices  # {user_id: pack_num}, shared across all views
-
-    async def _pick(self, interaction: discord.Interaction, pack_num: int):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn't your choice to make!", ephemeral=True)
-            return
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(content=f"You chose Pack {pack_num}!", view=self)
-        pack_image = await build_draft_pack_image(self.packs[pack_num][:13])
-        await interaction.followup.send(file=pack_image)
-        self.choices[self.user_id] = pack_num
-        await self.barrier.player_ready(self.user_id)
-
-    @discord.ui.button(label="Pack 1", style=discord.ButtonStyle.primary)
-    async def pack1(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        await self._pick(interaction, 1)
-
-    @discord.ui.button(label="Pack 2", style=discord.ButtonStyle.primary)
-    async def pack2(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        await self._pick(interaction, 2)
-
-    @discord.ui.button(label="Pack 3", style=discord.ButtonStyle.primary)
-    async def pack3(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        await self._pick(interaction, 3)
-
-
-class CardPickView(discord.ui.View):
-    def __init__(self, barrier: DraftBarrier, user_id: int, cards: list, player_picks: dict):
-        super().__init__(timeout=600)
-        self.barrier = barrier
-        self.user_id = user_id
-        self.cards = cards
-        self.player_picks = player_picks  # {user_id: [card, ...]}, shared across all views
+class DraftPickView(discord.ui.View):
+    def __init__(self, barrier: DraftBarrier, user_id: int, cards: list, round_picks: dict):
+        super().__init__(timeout=300)  # 5 minutes
+        self.barrier     = barrier
+        self.user_id     = user_id
+        self.cards       = cards
+        self.round_picks = round_picks  # {user_id: (idx, card)}
+        self.message: Optional[discord.Message] = None
 
         for i, card in enumerate(cards):
-            name = card.get('name', f'Card {i + 1}')
-            label = f"{i + 1} - {name}"[:80]  # Discord button label max is 80 chars
+            label = f"{i + 1} - {card.get('name', f'Card {i+1}')}"[:80]
             btn = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=i // 5)
-            btn.callback = self._make_pick_callback(i)
+            btn.callback = self._make_callback(i)
             self.add_item(btn)
 
-    def _make_pick_callback(self, idx: int):
+    def _make_callback(self, idx: int):
         async def callback(interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your pick!", ephemeral=True)
                 return
-            for child in self.children:
-                child.disabled = True
             card = self.cards[idx]
-            card_name = card.get('name', f'Card {idx + 1}')
-            await interaction.response.edit_message(
-                content=f"You picked **{card_name}**! Waiting for other players...", view=self
-            )
-            self.player_picks[self.user_id].append(card)
+            await interaction.response.defer()
+            await interaction.message.delete()
+            await interaction.followup.send(f"Picked **{card.get('name', f'Card {idx+1}')}**. Waiting for other players...")
+            self.round_picks[self.user_id] = (idx, card)
             await self.barrier.player_ready(self.user_id)
         return callback
 
-
-class ReadyView(discord.ui.View):
-    def __init__(self, barrier: DraftBarrier, user_id: int):
-        super().__init__(timeout=600)
-        self.barrier = barrier
-        self.user_id = user_id
-
-    @discord.ui.button(label="Ready", style=discord.ButtonStyle.green)
-    async def ready(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn't your button!", ephemeral=True)
+    async def on_timeout(self):
+        if self.user_id in self.round_picks:
             return
-        button.disabled = True
-        await interaction.response.edit_message(content="You're ready! Waiting for other players...", view=self)
+        card = self.cards[0]
+        self.round_picks[self.user_id] = (0, card)
+        if self.message:
+            try:
+                await self.message.edit(
+                    content=f"Time's up! Auto-picked **{card.get('name', 'Card 1')}**.",
+                    attachments=[],
+                    view=None,
+                )
+            except Exception:
+                pass
         await self.barrier.player_ready(self.user_id)
 
 
@@ -581,8 +505,6 @@ class ReadyView(discord.ui.View):
 # ---------------------------------------------------------------------------
 
 class Riftbound(commands.Cog):
-    # Each set entry has a list of precon deck codes and the companion card appended to each.
-    # To add a new set: add a new key matching its set_id, fill in precons and companion.
     PRECONS = {
         'SFD': {
             'companion': "SFD-116-1",  # Yone
@@ -622,12 +544,12 @@ class Riftbound(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self._refresh_task: Optional[asyncio.Task] = None
+        self._refresh_task:   Optional[asyncio.Task] = None
+        self._active_drafts:  dict[int, dict]        = {}  # channel_id -> {initiator_id, cancel}
 
     async def _refresh_loop(self) -> None:
-        """Background task: refresh card data and images every 6 hours."""
         while True:
-            await asyncio.sleep(REFRESH_INTERVAL)  # Sleep first; on_ready does initial refresh
+            await asyncio.sleep(REFRESH_INTERVAL)
             try:
                 await refresh_card_data_and_images()
             except Exception as e:
@@ -635,138 +557,214 @@ class Riftbound(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # Initial refresh: card data + pre-fetch all images
         await refresh_card_data_and_images()
-        # Start background refresh every 6 hours
         if self._refresh_task is None or self._refresh_task.done():
             self._refresh_task = asyncio.create_task(self._refresh_loop())
 
     @commands.hybrid_group(name="riftbound", description="Riftbound card game commands")
     async def riftbound(self, ctx: commands.Context):
-        """Riftbound card game commands. Use `open` or `sealed` subcommands."""
         await ctx.send_help(ctx.command)
 
     @riftbound.command(name="pack", description="Open a Riftbound pack")
     @app_commands.describe(deck_type="Pack type: origins, spiritforged, or unleashed (default)")
     @app_commands.choices(deck_type=[
-        app_commands.Choice(name="Origins", value="origins"),
+        app_commands.Choice(name="Origins",      value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
-        app_commands.Choice(name="Unleashed", value="unleashed"),
+        app_commands.Choice(name="Unleashed",    value="unleashed"),
     ])
     async def riftbound_open(self, ctx: commands.Context, deck_type: Optional[str] = None):
-        """Open a single Riftbound pack. Use !riftbound open or /riftbound open."""
         await ctx.defer()
         await self._register_profile(ctx.author)
-        set_id = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}.get(deck_type, 'UNL')
-        pack = await make_pack(set_id)
-        pack_image = await build_pack_image(pack)
-        await ctx.send(file=pack_image)
+        pack = await make_pack(SET_ID_MAP.get(deck_type, 'UNL'))
+        await ctx.send(file=await build_pack_image(pack))
 
     @riftbound.command(name="sealed", description="Generate a sealed pool")
     @app_commands.describe(deck_type="Pack type: origins, spiritforged, or unleashed (default)")
     @app_commands.choices(deck_type=[
-        app_commands.Choice(name="Origins", value="origins"),
+        app_commands.Choice(name="Origins",      value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
-        app_commands.Choice(name="Unleashed", value="unleashed"),
+        app_commands.Choice(name="Unleashed",    value="unleashed"),
     ])
     async def riftbound_sealed(self, ctx: commands.Context, deck_type: Optional[str] = None):
-        """Generate a sealed pool. Use !riftbound sealed or /riftbound sealed."""
         await ctx.defer()
         await self._register_profile(ctx.author)
-        set_id = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}.get(deck_type, 'UNL')
-        packs = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
+        set_id = SET_ID_MAP.get(deck_type, 'UNL')
+        packs  = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
 
-        precon_set = self.PRECONS.get(set_id, self.PRECONS['SFD'])
-        companion = precon_set.get('companion')
+        precon_set  = self.PRECONS.get(set_id, self.PRECONS['SFD'])
         precon_code = random.choice(precon_set['decks'])
-        if companion:
-            precon_code += " " + companion
-        all_cards = await get_all_cards()
+        if precon_set.get('companion'):
+            precon_code += " " + precon_set['companion']
+
+        all_cards   = await get_all_cards()
         precon_pack = code_to_cards(all_cards, precon_code)
 
-        precon_image = build_precon_pack_image(precon_pack)
-        other_images = [build_pack_image(pack) for pack in packs]
-        images = await asyncio.gather(precon_image, *other_images)
+        images = await asyncio.gather(
+            build_precon_pack_image(precon_pack),
+            *[build_pack_image(pack) for pack in packs],
+        )
 
-        all_sealed_cards = [card for pack in (packs + [precon_pack]) for card in pack]
-
-        card_codes = [clean_card_code(c["riftbound_id"]).upper() + "-1" for c in all_sealed_cards]
-        export_code = " ".join(card_codes)
+        all_cards_flat = [card for pack in (*packs, precon_pack) for card in pack]
+        export_code    = " ".join(clean_card_code(c["riftbound_id"]).upper() + "-1" for c in all_cards_flat)
 
         await ctx.send(f"{ctx.author.mention} Here's your sealed pool!", files=list(images))
-
-        for chunk in _format_sealed_pool(all_sealed_cards):
+        for chunk in _format_sealed_pool(all_cards_flat):
             await ctx.send(chunk)
-
         await ctx.send(f"Code: `{export_code}`")
 
-    @riftbound.command(name="draft", description="Start a draft game", with_app_command=False)
+    @riftbound.group(name="draft", with_app_command=False, invoke_without_command=True)
     async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[DeckTypeConverter] = None, *users: discord.Member):
-        """Start a draft. Use !riftbound draft [origins|spiritforged] @player1 @player2 ..."""
+        """Use !riftbound draft [origins|spiritforged|unleashed] @player1 @player2 ..."""
+        if ctx.invoked_subcommand is not None:
+            return
+
         await self._register_profile(ctx.author)
-        set_id = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}.get(deck_type, 'UNL')
+        set_id  = SET_ID_MAP.get(deck_type, 'UNL')
         players = list(users)
 
-        # Ensure there are players mentioned
-        if not players:
-            await ctx.send("Please mention at least one player!")
+        if len(players) < 2:
+            await ctx.send("Draft requires at least 2 players!")
             return
-        
-        # Ensure none of the players are bots, so we don't try to DM them and fail the draft start
+
+        if ctx.channel.id in self._active_drafts:
+            await ctx.send("A draft is already running in this channel!")
+            return
+
         for player in players:
             if player.bot:
                 await ctx.send(f"Cannot include bot {player.mention} in draft.")
                 return
-        
-        # Ensure all players have DMs open
+
         for player in players:
             try:
-                msg = await player.send(f"We are about to begin Riftbound draft, {player.mention}.")
+                await player.send(f"We are about to begin Riftbound draft, {player.mention}.")
             except discord.Forbidden:
-                await ctx.send(f"Could not DM {player.mention} (DMs disabled)") 
+                await ctx.send(f"Could not DM {player.mention} (DMs disabled)")
                 return
 
-        # If we got here, all players are valid and have DMs open
         await ctx.send(f"Draft started! Generating packs for {', '.join(p.mention for p in players)}...")
 
-        # Generate 3 packs per player
-        player_packs = {}
-        for player in players:
-            packs = await asyncio.gather(*[make_pack(set_id) for _ in range(3)])
-            player_packs[player.id] = {i + 1: pack for i, pack in enumerate(packs)}
+        cancel_event = asyncio.Event()
+        self._active_drafts[ctx.channel.id] = {
+            'initiator_id': ctx.author.id,
+            'cancel':       cancel_event,
+        }
 
+        try:
+            all_player_packs = await asyncio.gather(*[
+                asyncio.gather(*[make_pack(set_id) for _ in range(3)])
+                for _ in players
+            ])
+            player_packs = {p.id: list(packs) for p, packs in zip(players, all_player_packs)}
 
-        # Round 1: players choose which pack to open
-        pack_choices = {}
-        barrier = DraftBarrier([p.id for p in players])
-        for player in players:
-            pack_files = [discord.File(PACK_ASSET, filename=f"pack{i+1}.jpg") for i in range(3)]
-            view = PackSelectView(barrier, player.id, player_packs[player.id], pack_choices)
-            await player.send("Which pack do you want to open first?", files=pack_files, view=view)
+            n         = len(players)
+            all_picks = {p.id: [] for p in players}
+            cancelled = False
 
-        await ctx.send("Packs sent! Waiting for all players to choose a pack...")
-        await barrier.wait()
+            for pack_round in range(3):
+                if cancelled:
+                    break
+                await ctx.send(f"Pack {pack_round + 1} starting!")
 
-        await ctx.send("All players chose a pack! Waiting for card picks...")
+                current_packs = {p.id: list(player_packs[p.id][pack_round])[:13] for p in players}
+                pack_picks    = {p.id: [] for p in players}
+                pick_num      = 0
 
-        # Round 1: players pick a card from their chosen pack
-        player_picks = {p.id: [] for p in players}
-        barrier.reset()
-        for player in players:
-            pack = list(player_packs[player.id][pack_choices[player.id]])[:13]
-            view = CardPickView(barrier, player.id, pack, player_picks)
-            await player.send("Pick a card! The numbers match card positions in the image above.", view=view)
-        await barrier.wait()
-        await ctx.send("All players have made their picks!")
+                while any(len(current_packs[p.id]) > 1 for p in players):
+                    if cancelled:
+                        break
+                    pick_num += 1
+                    round_picks = {}
+                    barrier     = DraftBarrier([p.id for p in players])
 
-        
+                    pack_images = await asyncio.gather(*[
+                        build_draft_pack_image(current_packs[p.id]) for p in players
+                    ])
+                    views = [DraftPickView(barrier, p.id, current_packs[p.id], round_picks) for p in players]
+                    messages = await asyncio.gather(*[
+                        player.send(
+                            f"Pack {pack_round + 1}, Pick {pick_num} — {len(current_packs[player.id])} cards remain:",
+                            file=img,
+                            view=view,
+                        )
+                        for player, img, view in zip(players, pack_images, views)
+                    ])
+                    for view, msg in zip(views, messages):
+                        view.message = msg
 
-        
+                    cancelled = await _wait_for_barrier(barrier, cancel_event)
+                    if cancelled:
+                        break
 
+                    # Odd rounds (1, 3) pass left; even rounds (2) pass right
+                    direction = -1 if pack_round % 2 == 0 else 1
+                    new_packs = {}
+                    for i, player in enumerate(players):
+                        picked_idx, picked_card = round_picks[player.id]
+                        pack_picks[player.id].append(picked_card)
+                        all_picks[player.id].append(picked_card)
+                        remaining = [c for j, c in enumerate(current_packs[player.id]) if j != picked_idx]
+                        new_packs[players[(i + direction) % n].id] = remaining
+                    current_packs = new_packs
 
+                if cancelled:
+                    break
+
+                for player in players:
+                    last = current_packs[player.id]
+                    if last:
+                        card = last[0]
+                        pack_picks[player.id].append(card)
+                        all_picks[player.id].append(card)
+                        await player.send(f"Last card in the pack: **{card.get('name', 'Unknown')}** has been added to your pool.")
+
+                await ctx.send(f"Pack {pack_round + 1} complete!")
+                await asyncio.gather(*[
+                    self._send_pack_summary(player, pack_picks[player.id], pack_round)
+                    for player in players if pack_picks[player.id]
+                ])
+
+            if cancelled:
+                await ctx.send(f"Draft ended early by {ctx.author.mention}. Sending current pools...")
+                await asyncio.gather(*[
+                    self._send_final_pool(player, all_picks[player.id])
+                    for player in players if all_picks[player.id]
+                ])
+            else:
+                await ctx.send(f"Draft complete! {', '.join(p.mention for p in players)} — check your DMs for your full pool.")
+                await asyncio.gather(*[
+                    self._send_final_pool(player, all_picks[player.id])
+                    for player in players if all_picks[player.id]
+                ])
+
+        finally:
+            self._active_drafts.pop(ctx.channel.id, None)
+
+    @riftbound_draft.command(name="end", with_app_command=False)
+    async def riftbound_draft_end(self, ctx: commands.Context):
+        """Use !riftbound draft end to forcibly stop the current draft."""
+        draft = self._active_drafts.get(ctx.channel.id)
+        if not draft:
+            await ctx.send("There is no active draft in this channel.")
+            return
+        if ctx.author.id != draft['initiator_id']:
+            await ctx.send("Only the person who started the draft can end it.")
+            return
+        draft['cancel'].set()
+        await ctx.send("Ending the draft...")
+
+    async def _send_pack_summary(self, player: discord.Member, picks: list, pack_round: int):
+        img = await build_pack_image(picks)
+        await player.send(f"Your Pack {pack_round + 1} picks ({len(picks)} cards):", file=img)
+
+    async def _send_final_pool(self, player: discord.Member, picks: list):
+        img = await build_pack_image(picks)
+        await player.send(f"Your full draft pool ({len(picks)} cards):", file=img)
+        for chunk in _format_sealed_pool(picks):
+            await player.send(chunk)
 
     async def _register_profile(self, user):
-        if db.record("SELECT * FROM profiles WHERE user_id = ?", user.id) == None:
+        if db.record("SELECT * FROM profiles WHERE user_id = ?", user.id) is None:
             db.execute("INSERT INTO profiles (user_id, display_name) VALUES (?, ?)", user.id, user.display_name)
             db.commit()
 
