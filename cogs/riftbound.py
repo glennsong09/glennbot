@@ -25,7 +25,7 @@ RESIZE_FACTOR    = 0.5
 CACHE_DIR        = Path(__file__).parent.parent / "cache" / "card_images"
 REFRESH_INTERVAL = 6 * 3600
 
-SET_ID_MAP = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL'}
+SET_ID_MAP = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL', 'vendetta': 'VEN'}
 
 _BASE_CARD_W, _BASE_CARD_H = 744, 1039
 CARD_W = int(_BASE_CARD_W * RESIZE_FACTOR)
@@ -38,6 +38,8 @@ _RUNE_T    = (61/96, (61+32)/96)
 
 _RE_OVERNUMBERED = re.compile(r"\s*\(Overnumbered\)", re.IGNORECASE)
 _RE_ALT_ART      = re.compile(r"\s*\(Alternate Art\)", re.IGNORECASE)
+_RE_CARD_ID      = re.compile(r"^[a-z]+-(\d+)([a-z*]?)-(\d+)$", re.IGNORECASE)  # e.g. ven-042a-166
+_RE_SPECIAL_ID   = re.compile(r"^[a-z]+-sp\d+-", re.IGNORECASE)                # e.g. ven-sp1-006
 
 # ---------------------------------------------------------------------------
 # API helpers
@@ -152,10 +154,46 @@ def _by_rarity(cards: list, rarity: str) -> list:
 # Pack assembly
 # ---------------------------------------------------------------------------
 
+def _variant_flags(card: dict) -> tuple[bool, bool, bool]:
+    """(signature, alternate_art, overnumbered). Newer sets (e.g. VEN) are missing some metadata
+    flags, so also derive them from the ID: "042a" = alt art, "229*" = signature, number > set size = overnumbered."""
+    m = card["metadata"]
+    sig, alt, over = m["signature"], m["alternate_art"], m["overnumbered"]
+    match = _RE_CARD_ID.match(card["riftbound_id"])
+    if match:
+        num, suffix, set_size = int(match[1]), match[2], int(match[3])
+        sig  = sig  or suffix == "*"
+        alt  = alt  or suffix == "a"
+        over = over or (num > set_size and not sig)
+    return sig, alt, over
+
+
+def _is_showcase(card: dict) -> bool:
+    # Newer sets (e.g. UNL) tag showcase variants with their base rarity, so check the variant flags too
+    return card["classification"]["rarity"] == "Showcase" or any(_variant_flags(card))
+
+
+def _dedupe(cards: list) -> list:
+    """Drop duplicate API entries (same riftbound_id), preferring the one with metadata flags set."""
+    def flagged(c):
+        return any(c["metadata"][k] for k in ("signature", "alternate_art", "overnumbered"))
+
+    by_id = {}
+    for c in cards:
+        prev = by_id.get(c["riftbound_id"])
+        if prev is None or (flagged(c) and not flagged(prev)):
+            by_id[c["riftbound_id"]] = c
+    return list(by_id.values())
+
+
 def _compute_pools(all_cards: list, set_id: str) -> dict:
     """Build and validate all card pools for a set. Called once per set per cache refresh."""
-    set_cards = _by_set(all_cards, set_id)
-    showcases = _by_rarity(set_cards, "Showcase")
+    # Special subsets like "ven-sp1-006" are pulled at alt-art rarity
+    deduped       = _dedupe(_by_set(all_cards, set_id))
+    specials      = [c for c in deduped if _RE_SPECIAL_ID.search(c["riftbound_id"])]
+    all_set_cards = [c for c in deduped if not _RE_SPECIAL_ID.search(c["riftbound_id"])]
+    showcases     = [c for c in all_set_cards if _is_showcase(c)]
+    set_cards     = [c for c in all_set_cards if not _is_showcase(c)]
 
     commons    = [c for c in set_cards
                   if c["classification"]["rarity"] == "Common"
@@ -164,12 +202,12 @@ def _compute_pools(all_cards: list, set_id: str) -> dict:
     uncommons    = _by_rarity(set_cards, "Uncommon")
     rares        = _by_rarity(set_cards, "Rare")
     epics        = _by_rarity(set_cards, "Epic")
-    signatures   = [c for c in showcases if c["metadata"]["signature"]]
-    alt_arts     = [c for c in showcases if c["metadata"]["alternate_art"] and c["classification"]["type"] != "Rune"]
-    overnumbered = [c for c in showcases if c["metadata"]["overnumbered"] and not c["metadata"]["signature"]]
+    signatures   = [c for c in showcases if _variant_flags(c)[0]]
+    alt_arts     = [c for c in showcases if _variant_flags(c)[1] and c["classification"]["type"] != "Rune"] + specials
+    overnumbered = [c for c in showcases if _variant_flags(c)[2] and not _variant_flags(c)[0]]
 
     def _from_set_or_all(pred):
-        result = [c for c in set_cards if pred(c)]
+        result = [c for c in all_set_cards if pred(c)]
         return result or [c for c in all_cards if pred(c)]
 
     runes         = _from_set_or_all(lambda c: c["classification"]["type"] == "Rune" and c["classification"]["rarity"] == "Common")
@@ -301,7 +339,7 @@ def _build_grid(images: list, cols: int = 7, numbered: bool = False, bg=(0, 0, 0
             draw.text((lx + (CARD_W - tw) // 2, ly + (label_h - th) // 2), text, fill=(220, 200, 140, 255), font=font)
 
     buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
+    canvas.save(buf, format="WEBP", quality=90)
     buf.seek(0)
     return buf
 
@@ -310,21 +348,21 @@ async def build_pack_image(pack: list) -> discord.File:
     loop = asyncio.get_running_loop()
     imgs = await _fetch_images([c["media"]["image_url"] for c in pack])
     buf  = await loop.run_in_executor(None, _build_grid, imgs)
-    return discord.File(buf, filename="pack.png")
+    return discord.File(buf, filename="pack.webp")
 
 
 async def build_draft_pack_image(pack: list) -> discord.File:
     loop = asyncio.get_running_loop()
     imgs = await _fetch_images([c["media"]["image_url"] for c in pack])
     buf  = await loop.run_in_executor(None, functools.partial(_build_grid, imgs, numbered=True))
-    return discord.File(buf, filename="draft_pack.png")
+    return discord.File(buf, filename="draft_pack.webp")
 
 
 async def build_precon_pack_image(pack: list) -> discord.File:
     loop = asyncio.get_running_loop()
     imgs = await _fetch_images([c["media"]["image_url"] for c in pack[:28]])
     buf  = await loop.run_in_executor(None, functools.partial(_build_grid, imgs, bg=(0, 0, 0, 255)))
-    return discord.File(buf, filename="precon.png")
+    return discord.File(buf, filename="precon.webp")
 
 
 async def refresh_all_images(cards: list) -> int:
@@ -475,6 +513,10 @@ class DraftPickView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your pick!", ephemeral=True)
                 return
+            if self.user_id in self.round_picks:  # ignore double-clicks
+                await interaction.response.defer()
+                return
+            self.stop()
             card = self.cards[idx]
             await interaction.response.defer()
             await interaction.message.delete()
@@ -514,7 +556,7 @@ class Riftbound(commands.Cog):
                 # Jax
                 "SFD-193-1 SFD-213-1 SFD-033-1 SFD-040-1 SFD-041-1 SFD-042-1 SFD-095-1 SFD-098-1 SFD-102-1 SFD-107-1 SFD-037-1 SFD-093-1 SFD-054-1 SFD-092-1 SFD-035-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-042-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
                 # Rek'Sai
-                "SFD-187-1 SFD-217-1 SFD-003-1 SFD-004-1 SFD-018-1 SFD-151-1 SFD-159-1 SFD-006-1 SFD-010-1 SFD-015-1 SFD-156-1 SFD-157-1 SFD-161-1 SFD-164-1 SFD-170-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-214-1 OGN-214-114-1 OGN-214-1 OGN-214- OGN-214-1 OGN-21",
+                "SFD-187-1 SFD-217-1 SFD-003-1 SFD-004-1 SFD-018-1 SFD-151-1 SFD-159-1 SFD-006-1 SFD-010-1 SFD-015-1 SFD-156-1 SFD-157-1 SFD-161-1 SFD-164-1 SFD-170-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1 OGN-214-1",
                 # Lucian
                 "SFD-183-1 SFD-218-1 SFD-009-1 SFD-097-1 SFD-108-1 SFD-001-1 SFD-007-1 SFD-011-1 SFD-016-1 SFD-095-1 SFD-099-1 SFD-096-1 SFD-107-1 SFD-113-1 SFD-002-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-007-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1 OGN-126-1",
                 # Renata
@@ -566,11 +608,12 @@ class Riftbound(commands.Cog):
         await ctx.send_help(ctx.command)
 
     @riftbound.command(name="pack", description="Open a Riftbound pack")
-    @app_commands.describe(deck_type="Pack type: origins, spiritforged, or unleashed (default)")
+    @app_commands.describe(deck_type="Pack type: origins, spiritforged, unleashed (default), or vendetta")
     @app_commands.choices(deck_type=[
         app_commands.Choice(name="Origins",      value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
         app_commands.Choice(name="Unleashed",    value="unleashed"),
+        app_commands.Choice(name="Vendetta",     value="vendetta"),
     ])
     async def riftbound_open(self, ctx: commands.Context, deck_type: Optional[str] = None):
         await ctx.defer()
@@ -579,11 +622,12 @@ class Riftbound(commands.Cog):
         await ctx.send(file=await build_pack_image(pack))
 
     @riftbound.command(name="sealed", description="Generate a sealed pool")
-    @app_commands.describe(deck_type="Pack type: origins, spiritforged, or unleashed (default)")
+    @app_commands.describe(deck_type="Pack type: origins, spiritforged, unleashed (default), or vendetta")
     @app_commands.choices(deck_type=[
         app_commands.Choice(name="Origins",      value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
         app_commands.Choice(name="Unleashed",    value="unleashed"),
+        app_commands.Choice(name="Vendetta",     value="vendetta"),
     ])
     async def riftbound_sealed(self, ctx: commands.Context, deck_type: Optional[str] = None):
         await ctx.defer()
@@ -614,7 +658,7 @@ class Riftbound(commands.Cog):
 
     @riftbound.group(name="draft", with_app_command=False, invoke_without_command=True)
     async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[DeckTypeConverter] = None, *users: discord.Member):
-        """Use !riftbound draft [origins|spiritforged|unleashed] @player1 @player2 ..."""
+        """Use !riftbound draft [origins|spiritforged|unleashed|vendetta] @player1 @player2 ..."""
         if ctx.invoked_subcommand is not None:
             return
 
@@ -694,6 +738,8 @@ class Riftbound(commands.Cog):
 
                     cancelled = await _wait_for_barrier(barrier, cancel_event)
                     if cancelled:
+                        for view in views:
+                            view.stop()
                         break
 
                     # Odd rounds (1, 3) pass left; even rounds (2) pass right
