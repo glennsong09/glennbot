@@ -2,7 +2,7 @@ import discord
 import random
 import math
 from discord.ext import commands
-from discord.ext.commands import BucketType, cooldown
+from database.cooldowns import persistent_cooldown
 from discord import app_commands
 from typing import Optional
 from database import db
@@ -103,7 +103,7 @@ class Quests(commands.Cog):
         app_commands.Choice(name="Normal", value="normal"),
         app_commands.Choice(name="Hard",   value="hard"),
     ])
-    @cooldown(1, 86400, BucketType.user)
+    @persistent_cooldown(86400)
     async def quest(self, ctx, quest_type: Optional[str] = None):
         await self._register_profile(ctx.author)
 

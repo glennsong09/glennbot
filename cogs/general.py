@@ -3,7 +3,7 @@ import asyncio
 import discord
 import random
 from discord.ext import commands
-from discord.ext.commands import BucketType, cooldown
+from database.cooldowns import persistent_cooldown
 from database import db
 
 good_morning_roulette = ['Have a great day!',
@@ -73,7 +73,7 @@ class General(commands.Cog):
         await ctx.send(f'You\'re welcome, {ctx.author.mention}! ^^')
 
     @commands.hybrid_command(name='goodmorning', aliases=['gm'], description="Say good morning!")
-    @cooldown(1, 57600, BucketType.user)
+    @persistent_cooldown(57600)
     async def goodmorning(self, ctx):
         await self._register_profile(ctx.author)
         target = ctx.author
@@ -84,7 +84,7 @@ class General(commands.Cog):
         await ctx.send(f'{ctx.author.mention} ' + gm_statement)
 
     @commands.hybrid_command(name='goodnight', aliases=['gn'], description="Say good night!")
-    @cooldown(1, 57600, BucketType.user)
+    @persistent_cooldown(57600)
     async def goodnight(self, ctx):
         await self._register_profile(ctx.author)
         target = ctx.author

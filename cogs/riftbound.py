@@ -24,6 +24,7 @@ from database import db
 RESIZE_FACTOR    = 0.5
 CACHE_DIR        = Path(__file__).parent.parent / "cache" / "card_images"
 REFRESH_INTERVAL = 6 * 3600
+RETRY_INTERVAL   = 10 * 60  # after a failed refresh, retry this soon instead of waiting a full interval
 
 # In release order; the last entry is the newest set and the default for all commands
 SET_ID_MAP  = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL', 'vendetta': 'VEN'}
@@ -91,10 +92,20 @@ class _CardCache:
             now = time.time()
             if self._data is not None and now - self._time < REFRESH_INTERVAL:
                 return self._data
-            self._data  = await _fetch_all_cards_from_api()
-            self._time  = now
-            self._pools = {}
+            await self._load()
         return self._data
+
+    async def _load(self) -> None:
+        """Fetch fresh data. If the API is down, keep serving stale data (if any) and retry later."""
+        try:
+            self._data  = await _fetch_all_cards_from_api()
+            self._time  = time.time()
+            self._pools = {}
+        except RuntimeError:
+            if self._data is None:
+                raise
+            print("[riftbound] Card refresh failed; keeping previously cached card data")
+            self._time = time.time() - REFRESH_INTERVAL + RETRY_INTERVAL
 
     async def get_pools(self, set_id: str) -> dict:
         data = await self.get()
@@ -104,9 +115,7 @@ class _CardCache:
 
     async def refresh(self) -> list:
         async with self._lock:
-            self._data  = await _fetch_all_cards_from_api()
-            self._time  = time.time()
-            self._pools = {}
+            await self._load()
         return self._data
 
 
@@ -368,7 +377,9 @@ async def build_precon_pack_image(pack: list) -> discord.File:
 
 
 async def refresh_all_images(cards: list) -> int:
+    """Download any card images not already in the cache. Returns how many were downloaded."""
     urls = list({c["media"]["image_url"] for c in cards if c.get("media", {}).get("image_url")})
+    urls = [u for u in urls if not _url_to_cache_path(u).exists()]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(20)
 
@@ -396,7 +407,7 @@ async def refresh_card_data_and_images() -> None:
     print("[riftbound] Refreshing card data and images...")
     cards = await _card_cache.refresh()
     count = await refresh_all_images(cards)
-    print(f"[riftbound] Cached {count} card images")
+    print(f"[riftbound] Downloaded {count} new card images")
 
 
 # ---------------------------------------------------------------------------
@@ -593,17 +604,19 @@ class Riftbound(commands.Cog):
 
     async def _refresh_loop(self) -> None:
         while True:
-            await asyncio.sleep(REFRESH_INTERVAL)
             try:
                 await refresh_card_data_and_images()
             except Exception as e:
                 print(f"[riftbound] Refresh failed: {e}")
+            await asyncio.sleep(REFRESH_INTERVAL)
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        await refresh_card_data_and_images()
-        if self._refresh_task is None or self._refresh_task.done():
-            self._refresh_task = asyncio.create_task(self._refresh_loop())
+    # Started once when the cog loads (on_ready fires again on every reconnect)
+    async def cog_load(self):
+        self._refresh_task = asyncio.create_task(self._refresh_loop())
+
+    async def cog_unload(self):
+        if self._refresh_task:
+            self._refresh_task.cancel()
 
     @commands.hybrid_group(name="riftbound", description="Riftbound card game commands")
     async def riftbound(self, ctx: commands.Context):

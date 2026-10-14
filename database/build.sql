@@ -7,3 +7,10 @@ CREATE TABLE IF NOT EXISTS profiles (
 	current_quest text DEFAULT NULL,
 	current_quest_exp integer DEFAULT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cooldowns (
+	user_id integer,
+	command text,
+	last_used real,
+	PRIMARY KEY (user_id, command)
+);
