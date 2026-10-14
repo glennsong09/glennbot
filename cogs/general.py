@@ -47,6 +47,8 @@ class General(commands.Cog):
     async def dm(self, ctx):
         await self._register_profile(ctx.author)
         msg = await ctx.author.send("Hello from the bot!")
+        if ctx.interaction:  # slash commands must respond or Discord shows "did not respond"
+            await ctx.send("Check your DMs!", ephemeral=True)
         await asyncio.sleep(5)
         await msg.delete()
 
@@ -77,6 +79,7 @@ class General(commands.Cog):
         target = ctx.author
         curr_xp = db.record("SELECT exp FROM profiles WHERE user_id=?", target.id)[0]
         db.execute("UPDATE profiles SET exp = ? WHERE user_id=?", (curr_xp + 10), target.id)
+        db.commit()
         gm_statement = random.choice(good_morning_roulette)
         await ctx.send(f'{ctx.author.mention} ' + gm_statement)
 
@@ -87,6 +90,7 @@ class General(commands.Cog):
         target = ctx.author
         curr_xp = db.record("SELECT exp FROM profiles WHERE user_id=?", target.id)[0]
         db.execute("UPDATE profiles SET exp = ? WHERE user_id=?", (curr_xp + 10), target.id)
+        db.commit()
         gn_statement = random.choice(good_night_roulette)
         await ctx.send(f'{ctx.author.mention} ' + gn_statement)
 

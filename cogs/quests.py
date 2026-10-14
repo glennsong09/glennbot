@@ -107,6 +107,8 @@ class Quests(commands.Cog):
     async def quest(self, ctx, quest_type: Optional[str] = None):
         await self._register_profile(ctx.author)
 
+        quest_type = (quest_type or '').lower()
+
         if quest_type == 'easy':
             final_quests = make_quests(0)
         elif quest_type == 'hard':

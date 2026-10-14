@@ -25,7 +25,7 @@ class Profile(commands.Cog):
             display_name = display_name[0]
 
         # Get stats
-        profile_pic = target.avatar.url
+        profile_pic = target.display_avatar.url
         level, exp, tokens = db.records("SELECT level, exp, tokens FROM profiles WHERE user_id=?", target.id)[0]
         current_quest = db.record("SELECT current_quest FROM profiles WHERE user_id=?", target.id)[0]
 
