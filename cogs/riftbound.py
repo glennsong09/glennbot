@@ -25,7 +25,9 @@ RESIZE_FACTOR    = 0.5
 CACHE_DIR        = Path(__file__).parent.parent / "cache" / "card_images"
 REFRESH_INTERVAL = 6 * 3600
 
-SET_ID_MAP = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL', 'vendetta': 'VEN'}
+# In release order; the last entry is the newest set and the default for all commands
+SET_ID_MAP  = {'origins': 'OGN', 'spiritforged': 'SFD', 'unleashed': 'UNL', 'vendetta': 'VEN'}
+DEFAULT_SET = list(SET_ID_MAP.values())[-1]
 
 _BASE_CARD_W, _BASE_CARD_H = 744, 1039
 CARD_W = int(_BASE_CARD_W * RESIZE_FACTOR)
@@ -608,7 +610,7 @@ class Riftbound(commands.Cog):
         await ctx.send_help(ctx.command)
 
     @riftbound.command(name="pack", description="Open a Riftbound pack")
-    @app_commands.describe(deck_type="Pack type: origins, spiritforged, unleashed (default), or vendetta")
+    @app_commands.describe(deck_type="Pack type (default: newest set)")
     @app_commands.choices(deck_type=[
         app_commands.Choice(name="Origins",      value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
@@ -618,11 +620,11 @@ class Riftbound(commands.Cog):
     async def riftbound_open(self, ctx: commands.Context, deck_type: Optional[str] = None):
         await ctx.defer()
         await self._register_profile(ctx.author)
-        pack = await make_pack(SET_ID_MAP.get(deck_type, 'UNL'))
+        pack = await make_pack(SET_ID_MAP.get(deck_type, DEFAULT_SET))
         await ctx.send(file=await build_pack_image(pack))
 
     @riftbound.command(name="sealed", description="Generate a sealed pool")
-    @app_commands.describe(deck_type="Pack type: origins, spiritforged, unleashed (default), or vendetta")
+    @app_commands.describe(deck_type="Pack type (default: newest set)")
     @app_commands.choices(deck_type=[
         app_commands.Choice(name="Origins",      value="origins"),
         app_commands.Choice(name="Spiritforged", value="spiritforged"),
@@ -632,7 +634,7 @@ class Riftbound(commands.Cog):
     async def riftbound_sealed(self, ctx: commands.Context, deck_type: Optional[str] = None):
         await ctx.defer()
         await self._register_profile(ctx.author)
-        set_id = SET_ID_MAP.get(deck_type, 'UNL')
+        set_id = SET_ID_MAP.get(deck_type, DEFAULT_SET)
         packs  = await asyncio.gather(*[make_pack(set_id) for _ in range(5)])
 
         precon_set  = self.PRECONS.get(set_id, self.PRECONS['SFD'])
@@ -658,12 +660,12 @@ class Riftbound(commands.Cog):
 
     @riftbound.group(name="draft", with_app_command=False, invoke_without_command=True)
     async def riftbound_draft(self, ctx: commands.Context, deck_type: Optional[DeckTypeConverter] = None, *users: discord.Member):
-        """Use !riftbound draft [origins|spiritforged|unleashed|vendetta] @player1 @player2 ..."""
+        """Use !riftbound draft [origins|spiritforged|unleashed|vendetta] @player1 @player2 ... (default: newest set)"""
         if ctx.invoked_subcommand is not None:
             return
 
         await self._register_profile(ctx.author)
-        set_id  = SET_ID_MAP.get(deck_type, 'UNL')
+        set_id  = SET_ID_MAP.get(deck_type, DEFAULT_SET)
         players = list(users)
 
         if len(players) < 2:
